@@ -137,21 +137,30 @@ def _render_pyroom(
     room_dim: np.ndarray,
     sr: int,
     n_samples: int,
+    target_rt60: Optional[float] = None,
 ) -> tuple[list[np.ndarray], float, float, int]:
     """Return per-source [n_mics, T] tracks, rt60, absorption, max_order."""
-    absorption = float(random.uniform(0.2, 0.85))
-    max_order = int(random.randint(8, 24))
+    if target_rt60 is not None and target_rt60 > 0:
+        e_absorption, max_order = pra.inverse_sabine(float(target_rt60), room_dim.tolist())
+        absorption = float(e_absorption)
+        max_order = int(min(max(int(max_order), 8), 80))
+    else:
+        absorption = float(random.uniform(0.2, 0.85))
+        max_order = int(random.randint(8, 24))
     room = pra.ShoeBox(
         p=room_dim.tolist(),
         fs=sr,
+        materials=pra.Material(absorption),
         max_order=max_order,
-        absorption=absorption,
     )
     room.add_microphone_array(mic_positions.T)
     for seg, pos in zip(segments, positions):
         room.add_source(pos.tolist(), signal=np.asarray(seg, dtype=np.float64))
     premix = room.simulate(return_premix=True)
-    rt60 = float(np.mean(room.measure_rt60()))
+    try:
+        rt60 = float(np.mean(room.measure_rt60()))
+    except Exception:
+        rt60 = float(target_rt60) if target_rt60 is not None else float("nan")
     tracks: list[np.ndarray] = []
     n_mics = mic_positions.shape[0]
     for i in range(len(segments)):
@@ -280,6 +289,7 @@ def _generate_split(
     p_n_in0: float,
     p_n_in1: float,
     start_index: int,
+    rt60_list: Optional[Sequence[float]] = None,
 ) -> None:
     n_total_samps = int(sr * duration_s)
     pbar = tqdm(range(n_samples), desc=f"{split_name}", dynamic_ncols=True)
@@ -332,8 +342,15 @@ def _generate_split(
             )
 
         if segments:
+            target_rt60 = float(random.choice(list(rt60_list))) if rt60_list else None
             tracks, rt60, absorption, max_order = _render_pyroom(
-                segments, positions, mics, room_dim, sr, n_total_samps
+                segments,
+                positions,
+                mics,
+                room_dim,
+                sr,
+                n_total_samps,
+                target_rt60=target_rt60,
             )
             for i, track in enumerate(tracks):
                 peak = float(np.max(np.abs(track)) + 1e-9)
@@ -379,7 +396,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-path", type=str, required=True)
     p.add_argument("--sr", type=int, default=24000)
     p.add_argument("--duration", type=float, default=5.0)
-    p.add_argument("--dis-threshold", type=float, default=1.35)
+    p.add_argument("--dis-threshold", type=float, default=1.5)
     p.add_argument("--outside-gap", type=float, default=0.08)
     p.add_argument("--n-out-min", type=int, default=1)
     p.add_argument("--n-out-max", type=int, default=2)
@@ -393,6 +410,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--val-max-files", type=int, default=300, help="Cap val speech files loaded into RAM.")
     p.add_argument("--p-n-in0", type=float, default=0.5)
     p.add_argument("--p-n-in1", type=float, default=0.25)
+    p.add_argument(
+        "--rt60-list",
+        type=float,
+        nargs="+",
+        default=[0.2, 0.8, 1.0, 1.6],
+        help="Sample one target RT60 per clip via inverse Sabine (empty = legacy random absorption).",
+    )
     p.add_argument("--seed", type=int, default=12)
     return p
 
@@ -432,55 +456,46 @@ def main() -> None:
         f"n_in=0 -> {args.p_n_in0:.2f}, n_in=1 -> {args.p_n_in1:.2f}, "
         f"n_in=2 -> {1.0 - args.p_n_in0 - args.p_n_in1:.2f}"
     )
+    rt60_list = [float(x) for x in (args.rt60_list or [])]
     print(f"[info] dis_threshold={args.dis_threshold}, outside_gap={args.outside_gap}")
+    print(f"[info] rt60_list={rt60_list if rt60_list else 'legacy-random-absorption'}")
+
+    split_kwargs = dict(
+        output_root=out_root,
+        sr=int(args.sr),
+        duration_s=float(args.duration),
+        dis_threshold=float(args.dis_threshold),
+        outside_gap=float(args.outside_gap),
+        n_out_min=int(args.n_out_min),
+        n_out_max=int(args.n_out_max),
+        p_n_in0=float(args.p_n_in0),
+        p_n_in1=float(args.p_n_in1),
+        rt60_list=rt60_list if rt60_list else None,
+    )
 
     if args.n_train > 0:
         _generate_split(
             split_name="train",
             n_samples=int(args.n_train),
             voice_pool=train_pool,
-            output_root=out_root,
-            sr=int(args.sr),
-            duration_s=float(args.duration),
-            dis_threshold=float(args.dis_threshold),
-            outside_gap=float(args.outside_gap),
-            n_out_min=int(args.n_out_min),
-            n_out_max=int(args.n_out_max),
-            p_n_in0=float(args.p_n_in0),
-            p_n_in1=float(args.p_n_in1),
             start_index=int(args.train_start),
+            **split_kwargs,
         )
     if args.n_val > 0:
         _generate_split(
             split_name="val",
             n_samples=int(args.n_val),
             voice_pool=val_pool,
-            output_root=out_root,
-            sr=int(args.sr),
-            duration_s=float(args.duration),
-            dis_threshold=float(args.dis_threshold),
-            outside_gap=float(args.outside_gap),
-            n_out_min=int(args.n_out_min),
-            n_out_max=int(args.n_out_max),
-            p_n_in0=float(args.p_n_in0),
-            p_n_in1=float(args.p_n_in1),
             start_index=int(args.val_start),
+            **split_kwargs,
         )
     if args.n_test > 0:
         _generate_split(
             split_name="test",
             n_samples=int(args.n_test),
             voice_pool=train_pool,
-            output_root=out_root,
-            sr=int(args.sr),
-            duration_s=float(args.duration),
-            dis_threshold=float(args.dis_threshold),
-            outside_gap=float(args.outside_gap),
-            n_out_min=int(args.n_out_min),
-            n_out_max=int(args.n_out_max),
-            p_n_in0=float(args.p_n_in0),
-            p_n_in1=float(args.p_n_in1),
             start_index=int(args.test_start),
+            **split_kwargs,
         )
 
     args_out = vars(args).copy()

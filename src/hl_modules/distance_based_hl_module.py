@@ -48,13 +48,15 @@ class PLModule(object):
                  scheduler=None, scheduler_params=None,
                  loss=None, loss_params=None, 
                  metrics=[], init_ckpt=None,
+                 init_head_ckpt=None,
                  grad_clip = None,
                  use_dp=True,
                  val_log_interval=10, # Unused, only kept for compatibility TODO: Remove
                  samples_per_speaker_number=3,
                  count_distance_head=None,
                  distance_head=None,
-                 speaker_head=None):
+                 speaker_head=None,
+                 distance_sweep_val=None):
 
         if distance_head is not None and distance_head.get("enabled", False):
             raise ValueError(
@@ -154,6 +156,19 @@ class PLModule(object):
                 state = torch.load(init_ckpt)['model']
                 self._load_init_state(state)
 
+        # Overlay count/distance head weights from a second checkpoint (e.g. ep93
+        # backbone + later head-only or joint-head checkpoint).
+        if init_head_ckpt is not None:
+            if not self.count_distance_head_enabled:
+                raise ValueError("init_head_ckpt requires count_distance_head.enabled=true")
+            head_blob = torch.load(init_head_ckpt, map_location="cpu")
+            head_state = head_blob["model"] if isinstance(head_blob, dict) and "model" in head_blob else head_blob
+            self._load_head_state(head_state)
+            print(f"Loaded count/distance head weights from {init_head_ckpt}")
+
+        self.distance_sweep_val_cfg = distance_sweep_val or {}
+        self.distance_sweep_val_enabled = bool(self.distance_sweep_val_cfg.get("enabled", False))
+
         if self.freeze_backbone:
             self._freeze_backbone_for_heads()
 
@@ -217,6 +232,27 @@ class PLModule(object):
                 "Backbone strict-load failed for init_ckpt. "
                 f"Missing backbone keys: {missing_backbone[:5]}, "
                 f"Unexpected backbone keys: {unexpected_backbone[:5]}"
+            )
+
+    def _load_head_state(self, state_dict):
+        """Load only count_distance_head / legacy speaker_head keys into the model."""
+        model = self._inner_model()
+        state_dict = self._remap_legacy_head_keys(state_dict)
+        head_only = {k: v for k, v in state_dict.items() if self._is_head_key(k)}
+        if not head_only:
+            raise RuntimeError("init_head_ckpt contained no count_distance_head / speaker_head keys.")
+        missing, unexpected = model.load_state_dict(head_only, strict=False)
+        missing_heads = [k for k in missing if self._is_head_key(k)]
+        if missing_heads:
+            raise RuntimeError(
+                "Head load incomplete for init_head_ckpt. "
+                f"Missing head keys: {missing_heads[:8]}"
+            )
+        unexpected_heads = [k for k in unexpected if self._is_head_key(k)]
+        if unexpected_heads:
+            raise RuntimeError(
+                "Unexpected head keys while loading init_head_ckpt: "
+                f"{unexpected_heads[:8]}"
             )
 
     def _freeze_backbone_for_heads(self):
@@ -315,6 +351,53 @@ class PLModule(object):
         except Exception:
             return default
 
+    def _run_and_log_distance_sweep_val(self, best_path):
+        """Epoch-end LibriSpeech distance→dBFS sweep (validation monitor)."""
+        from src.validation.distance_sweep_dbfs import run_distance_sweep, write_sweep_csv
+
+        cfg = self.distance_sweep_val_cfg
+        device = next(self._inner_model().parameters()).device
+        # DataParallel forward expects the wrapped module.
+        model = self.model
+        sweep = run_distance_sweep(
+            model,
+            device=str(device),
+            speech_path=cfg.get(
+                "speech_path",
+                r"C:\Users\darre\Sound_Bubble\datasets\_speech_cache\5694-64038-0000.flac",
+            ),
+            distances=cfg.get("distances"),
+            rt60_list=cfg.get("rt60_list"),
+            target_in_dbfs=float(cfg.get("target_in_dbfs", -25.0)),
+            sr=int(cfg.get("sr", self.sr)),
+            dur_s=float(cfg.get("dur_s", 2.0)),
+        )
+        summary = sweep["summary"]
+        bubble_m = float(cfg.get("bubble_m", 1.5))
+        print(
+            "[VAL distance-dBFS sweep] "
+            f"0.5m={summary['out_dbfs_0_5m']:.1f}  "
+            f"0.8m={summary['out_dbfs_0_8m']:.1f}  "
+            f"1.0m={summary['out_dbfs_1_0m']:.1f}  "
+            f"1.2m={summary['out_dbfs_1_2m']:.1f}  "
+            f"1.5m={summary['out_dbfs_1_5m']:.1f}  "
+            f"2.0m={summary['out_dbfs_2_0m']:.1f}  "
+            f"3.0m={summary['out_dbfs_3_0m']:.1f}  "
+            f"pass-far={summary['passband_minus_far_db']:.1f}dB  "
+            f"edge(1.5->2.0)={summary['edge_drop_1_5_to_2_0_db']:.1f}dB  "
+            f"(bubble={bubble_m}m)"
+        )
+        for key, value in summary.items():
+            self.log_metric(f"val/sweep_{key}", float(value), batch_size=1, on_step=False, on_epoch=True)
+
+        run_dir = os.path.dirname(os.path.dirname(os.path.abspath(best_path)))
+        sweep_dir = os.path.join(run_dir, "val_distance_sweep")
+        os.makedirs(sweep_dir, exist_ok=True)
+        csv_path = os.path.join(sweep_dir, f"epoch_{self.epoch:03d}.csv")
+        write_sweep_csv(csv_path, sweep)
+        # Keep a rolling "latest" copy for quick inspection.
+        write_sweep_csv(os.path.join(sweep_dir, "latest.csv"), sweep)
+
     def on_epoch_end(self, best_path, wandb_run):
         assert self.epoch + 1 == len(self.metric_values), \
             "Current epoch must be equal to length of metrics (0-indexed)"
@@ -344,6 +427,9 @@ class PLModule(object):
         if save:
             print("Current checkpoint is the best! Saving it...")
             self.dump_state(best_path)
+
+        if self.distance_sweep_val_enabled:
+            self._run_and_log_distance_sweep_val(best_path)
         
         val_loss = self._try_get_avg_metric_at_epoch('val/loss')
         print(f'Val loss: {val_loss:.04f}')

@@ -75,6 +75,10 @@ def train(args: argparse.Namespace):
     with open(args.config, 'rb') as f:
         params = json.load(f)
 
+    # Optional CLI overrides (do not require editing the JSON config)
+    if getattr(args, "epochs", None) is not None:
+        params["epochs"] = int(args.epochs)
+
     # Initialize datasets
     data_train = utils.import_attr(params['train_dataset'])(**params['train_data_args'], split='train')
     data_val = utils.import_attr(params['val_dataset'])(**params['val_data_args'], split='val')
@@ -154,7 +158,14 @@ def train(args: argparse.Namespace):
                 wandb_run = _NoOpWandbRun()
 
     # Training loop
-    try:        
+    try:
+        if start_epoch >= params['epochs']:
+            print(
+                f"Nothing left to train: start_epoch={start_epoch} >= epochs={params['epochs']}. "
+                f"Delete {state_path} or raise epochs / use a fresh --run_dir to continue."
+            )
+            return
+
         # Go over remaining epochs
         for epoch in range(start_epoch, params['epochs']):
             global CURRENT_EPOCH, VAL_SEED
@@ -244,4 +255,8 @@ if __name__ == '__main__':
     parser.add_argument('--no_wandb',
                         action='store_true',
                         help='Disable Weights & Biases logging (offline/no key).')
+    parser.add_argument('--epochs',
+                        type=int,
+                        default=None,
+                        help='Override config epochs (useful to resume a finished run to a higher max).')
     train(parser.parse_args())
