@@ -25,6 +25,8 @@ class OnnxRunResult:
     count_confidence: float | None = None
     count_status: str = "unavailable"
     speaker_distances: tuple[dict[str, object], ...] | None = None
+    # Optional in-bubble speaker streams for controllable mixer (e.g. s0/s1).
+    speaker_streams: tuple[np.ndarray, ...] | None = None
 
 
 class ONNXStreamer:
@@ -60,6 +62,8 @@ class ONNXStreamer:
         self.has_distance_outputs = self._distance_m_index is not None and self._distance_valid_index is not None
         self._count_probs_index = self._output_name_to_index.get("count_probs")
         self.has_count_outputs = self._count_probs_index is not None
+        self._stream_output_names = [n for n in ("s0", "s1", "speaker_0", "speaker_1") if n in self._output_name_to_index]
+        self.has_speaker_streams = len(self._stream_output_names) > 0
         self.distance_valid_threshold = 0.5
         self.distance_trained = False
         self.count_min_confidence = 0.6
@@ -207,6 +211,21 @@ class ONNXStreamer:
                     }
                 )
             speaker_distances = tuple(rows)
+
+        speaker_streams = None
+        if self.has_speaker_streams:
+            streams: list[np.ndarray] = []
+            for name in self._stream_output_names:
+                arr = outputs[self._output_name_to_index[name]]
+                # Expect [B, T] or [B, 1, T]
+                if arr.ndim == 3:
+                    streams.append(arr[0, 0].astype(np.float32, copy=False))
+                elif arr.ndim == 2:
+                    streams.append(arr[0].astype(np.float32, copy=False))
+                else:
+                    streams.append(arr.reshape(-1).astype(np.float32, copy=False))
+            speaker_streams = tuple(streams)
+
         return OnnxRunResult(
             output=outputs[self._output_index],
             infer_ms=infer_ms,
@@ -217,5 +236,6 @@ class ONNXStreamer:
             count_confidence=count_confidence,
             count_status=count_status,
             speaker_distances=speaker_distances,
+            speaker_streams=speaker_streams,
         )
 

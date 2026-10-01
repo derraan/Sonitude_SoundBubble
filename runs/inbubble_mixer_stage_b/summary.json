@@ -1,0 +1,73 @@
+{
+  "stage": "B",
+  "n_train": 40,
+  "n_val": 12,
+  "history": [
+    {
+      "epoch": 0,
+      "train_loss": 0.7698766618967057
+    },
+    {
+      "epoch": 1,
+      "train_loss": -0.39364540576934814
+    },
+    {
+      "epoch": 2,
+      "train_loss": -0.13097215294837952
+    },
+    {
+      "epoch": 3,
+      "train_loss": -0.16044809222221373
+    },
+    {
+      "epoch": 4,
+      "train_loss": -0.48131186366081236
+    },
+    {
+      "epoch": 5,
+      "train_loss": -0.10701473951339721
+    },
+    {
+      "epoch": 6,
+      "train_loss": -0.1609145313501358
+    },
+    {
+      "epoch": 7,
+      "train_loss": -0.1702522963285446
+    },
+    {
+      "epoch": 8,
+      "train_loss": -0.21157280206680298
+    },
+    {
+      "epoch": 9,
+      "train_loss": -0.30062949657440186
+    },
+    {
+      "epoch": 10,
+      "train_loss": -0.26636157035827634
+    },
+    {
+      "epoch": 11,
+      "train_loss": -0.38521029353141784
+    }
+  ],
+  "oracle_bubble_eval": {
+    "mean_stream_sisdr": 0.34747714585590456,
+    "mean_boost": 10.116098486742315,
+    "mean_cut": 5.538240179473296,
+    "mean_cons": 1.0001854254154275e-06
+  },
+  "model_bhat_eval": {
+    "mean_stream_sisdr": -4.634144883355627,
+    "mean_boost": 4.636896701483086,
+    "mean_cut": -7.9202556004377485,
+    "mean_cons": 1.0000544389777598e-06
+  },
+  "gate": {
+    "name": "non_oracle_streams_stable_control",
+    "passed": true,
+    "model_transfer_ok": false,
+    "note": "Pass if K=2 soft-mask probe on oracle bubble yields boost/cut control SI-SDR > 3 dB with low mix residual. Model-b_hat transfer reported separately."
+  }
+}

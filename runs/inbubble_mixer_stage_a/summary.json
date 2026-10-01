@@ -1,0 +1,52 @@
+{
+  "stage": "A",
+  "run_dir": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+  "dataset_root": "C:\\Users\\darre\\Sound_Bubble\\datasets\\syn_libri_1_5m_rt60",
+  "n_samples": 16,
+  "identity_recoveries": 16,
+  "identity_rate": 1.0,
+  "mean_bubble_sisdr": 0.7582603324328958,
+  "oracle_ctrl_sisdr_vs_leak": {
+    "0.0": {
+      "mean": 111.16637865881808,
+      "p25": 108.47783485860501,
+      "p75": 114.89181424266242,
+      "n": 96
+    },
+    "0.1": {
+      "mean": 21.541797024375686,
+      "p25": 18.911072442227116,
+      "p75": 24.043831332852193,
+      "n": 96
+    },
+    "0.25": {
+      "mean": 12.752940494341408,
+      "p25": 10.086779446447496,
+      "p75": 15.580482311175922,
+      "n": 96
+    },
+    "0.5": {
+      "mean": 4.988825423996865,
+      "p25": 2.3766588655547625,
+      "p75": 9.239094491921158,
+      "n": 96
+    },
+    "1.0": {
+      "mean": -15.920802809869302,
+      "p25": -37.69948737806938,
+      "p75": 2.568187617536964,
+      "n": 96
+    }
+  },
+  "mean_s0_sisdr_boost_g2": 6.627275211676924,
+  "mean_s0_sisdr_cut_g0p25": -11.432662061923676,
+  "gate": {
+    "name": "oracle_streams_enable_useful_control",
+    "identity_ok": true,
+    "leak0_ctrl_sisdr": 111.16637865881808,
+    "leak_high_ctrl_sisdr": -15.920802809869302,
+    "boost_beats_cut_on_s0": true,
+    "passed": true,
+    "note": "Pass if g=1 recovers b_hat, oracle leak=0 control matches clean mix, boosting speaker0 raises s0 SI-SDR vs cutting it, and leakage degrades control."
+  }
+}

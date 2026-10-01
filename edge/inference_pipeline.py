@@ -30,6 +30,7 @@ from edge.realtime.dry_reference import DryReferenceRing
 from edge.realtime.scheduling import try_set_realtime_fifo
 
 from edge.pipeline.onnx_streamer import ONNXStreamer
+from edge.realtime.inbubble_mixer import mix_inbubble
 from edge.pipeline.processing import (
     ChannelLevelValidator,
     DCOffsetFilter,
@@ -144,6 +145,48 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--require-soxr", action="store_true", help="Fail if streaming SoXR backend is unavailable.")
+    # In-bubble controllable mixer (additive on promoted b_hat). Default g_k=1 → pass-through.
+    parser.add_argument(
+        "--inbubble-mixer",
+        action="store_true",
+        help="Enable feature-flagged in-bubble mixer: y = b_hat + sum (g_k-1)*s_hat_k. Requires --speaker-streams ONNX outs or zeros.",
+    )
+    parser.add_argument(
+        "--speaker-gains",
+        type=str,
+        default="1,1",
+        help="Comma-separated gains for in-bubble streams (default 1,1 recovers b_hat).",
+    )
+    parser.add_argument(
+        "--region-center-deg",
+        type=float,
+        default=None,
+        help="If set with --region-half-width-deg, override gains via angular region (needs stream angles).",
+    )
+    parser.add_argument(
+        "--region-half-width-deg",
+        type=float,
+        default=30.0,
+        help="Half-width of directional gain region in degrees.",
+    )
+    parser.add_argument(
+        "--region-gain-in",
+        type=float,
+        default=2.0,
+        help="Gain applied to streams inside the angular region.",
+    )
+    parser.add_argument(
+        "--region-gain-out",
+        type=float,
+        default=1.0,
+        help="Gain applied to in-bubble streams outside the angular region.",
+    )
+    parser.add_argument(
+        "--stream-angles-deg",
+        type=str,
+        default=None,
+        help="Comma-separated angles for each speaker stream (for region gain). Example: -60,30",
+    )
     return parser.parse_args()
 
 def _resolve_zoo_model(zoo_dir: str, bubble_radius: float) -> tuple[str, str, list[float]]:
@@ -625,6 +668,26 @@ def main() -> None:
                     latest_count_status = run_res.count_status
                     latest_speaker_distances = run_res.speaker_distances
                     y_chunk = run_res.output[0, 0, : args.model_chunk].astype(np.float32, copy=False)
+                    if args.inbubble_mixer:
+                        gains = [float(x) for x in str(args.speaker_gains).split(",") if x.strip()]
+                        if args.region_center_deg is not None and args.stream_angles_deg:
+                            angles = [float(x) for x in str(args.stream_angles_deg).split(",") if x.strip()]
+                            gains = []
+                            for ang in angles:
+                                delta = abs(((ang - float(args.region_center_deg) + 180.0) % 360.0) - 180.0)
+                                gains.append(
+                                    float(args.region_gain_in)
+                                    if delta <= float(args.region_half_width_deg)
+                                    else float(args.region_gain_out)
+                                )
+                        streams = []
+                        if run_res.speaker_streams:
+                            for s in run_res.speaker_streams:
+                                streams.append(np.asarray(s[: args.model_chunk], dtype=np.float32).reshape(-1))
+                        while len(streams) < max(1, len(gains)):
+                            streams.append(np.zeros(args.model_chunk, dtype=np.float32))
+                        streams = streams[: len(gains)]
+                        y_chunk = mix_inbubble(y_chunk, streams, gains=gains).y
                     steps += 1
 
                     if run_res.infer_ms > args.max_overrun_ms:

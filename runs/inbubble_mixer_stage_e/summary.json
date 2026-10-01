@@ -1,0 +1,43 @@
+{
+  "stage": "E",
+  "hop_ms": 8.0,
+  "block_ms": 16.0,
+  "hops_per_io": 2,
+  "torch_bubble_only_ms": {
+    "mean_ms": 295.57830666696344,
+    "std_ms": 91.08453955908801,
+    "p95_ms": 418.95413999955053,
+    "input_shape": [
+      1,
+      6,
+      192
+    ]
+  },
+  "torch_multi_out_ms": {
+    "mean_ms": 77.52401999993405,
+    "std_ms": 32.01983072611555,
+    "p95_ms": 133.47522999993083,
+    "input_shape": [
+      1,
+      6,
+      384
+    ]
+  },
+  "torch_splitter_only_ms": {
+    "mean_ms": 5.712093333325659,
+    "std_ms": 0.6122818433044583,
+    "p95_ms": 6.697660001191252
+  },
+  "splitter_onnx_path": null,
+  "ort_splitter_ms": null,
+  "export_error": "SymbolicValueError('STFT does not currently support complex types  [Caused by the value \\'61 defined in (%61 : Float(*, *, strides=[896, 1], requires_grad=0, device=cpu) = onnx::Reshape[allowzero=0](%50, %60), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s # C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\functional.py:680:0\\n)\\' (type \\'Tensor\\') in the TorchScript graph. The containing node has kind \\'onnx::Reshape\\'.] \\n    (node defined in C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\functional.py(680): stft\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_b_separation_probe.py(53): stft\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_b_separation_probe.py(75): forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1769): _slow_forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1790): _call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1779): _wrapped_call_impl\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(72): forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1769): _slow_forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1790): _call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1779): _wrapped_call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\jit\\\\_trace.py(131): wrapper\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\jit\\\\_trace.py(140): forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1790): _call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1779): _wrapped_call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\jit\\\\_trace.py(1439): _get_trace_graph\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(903): _trace_and_get_graph_from_model\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(997): _create_jit_graph\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(1113): _model_to_graph\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(1515): _export\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(552): export\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\__init__.py(334): export\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(77): export_splitter_onnx\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(166): main\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(234): <module>\\n<frozen runpy>(88): _run_code\\n<frozen runpy>(198): _run_module_as_main\\n)\\n\\n    Inputs:\\n        #0: 50 defined in (%50 : Float(*, *, *, strides=[896, 896, 1], requires_grad=0, device=cpu) = onnx::Pad[mode=\"reflect\"](%22, %49), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s # C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\functional.py:5430:0\\n    )  (type \\'Tensor\\')\\n        #1: 60 defined in (%60 : int[] = prim::ListConstruct(%54, %59), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s\\n    )  (type \\'List[int]\\')\\n    Outputs:\\n        #0: 61 defined in (%61 : Float(*, *, strides=[896, 1], requires_grad=0, device=cpu) = onnx::Reshape[allowzero=0](%50, %60), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s # C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\functional.py:680:0\\n    )  (type \\'Tensor\\')')",
+  "overhead_ratio_torch": 0.26227912621233934,
+  "bubble_plus_splitter_est_ms": 301.2904000002891,
+  "sustainable_hops_estimate": 0.2063876460484584,
+  "recommendation": "multi-out exceeds block budget on this host proxy; keep K=0 mixer pass-through or lighter mask-on-b_hat until Pi 5 re-measure",
+  "gate": {
+    "name": "pi5_cost_envelope",
+    "passed": false,
+    "note": "Pass if multi-out mean infer (77.52 ms) fits 2 hops in 16.0 ms block. Host CPU proxy \u2014 re-measure on Pi 5 before deploy."
+  }
+}
