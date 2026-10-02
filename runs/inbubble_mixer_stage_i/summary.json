@@ -1,0 +1,24 @@
+{
+  "stage": "I",
+  "promote_run": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+  "directional_run": "runs/optim_pretrain_sonitude_dist_count_directional_1_5m",
+  "directional_loaded": true,
+  "softmask_loaded": true,
+  "n_samples": 32,
+  "identity_rate": 1.0,
+  "beta_better_than_blind_rate": 1.0,
+  "mean_s0_sisdr_beta": 4.85818673826788,
+  "mean_s0_sisdr_blind": -5.698716417604117,
+  "mean_s1_sisdr_beta": -8.665348333428275,
+  "mean_s1_sisdr_blind": -11.365476006658385,
+  "api": {
+    "default_listen": "promote b_hat with g_k=1 (or alpha=0)",
+    "region_control": "theta0 -> g_k = gains_from_beta(angles, theta0)",
+    "steered_blend": "y=(1-alpha)*b_hat + alpha*z_hat  (directional run; alpha=0 default)"
+  },
+  "gate": {
+    "name": "beta_gains_lower_leakage_than_blind",
+    "passed": true,
+    "note": "Pass if g=1 still recovers promote b_hat and \u03b2-weighted gains match or beat blind softmask on s0 boost / s1 leakage when \u03b80 known."
+  }
+}

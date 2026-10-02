@@ -1,0 +1,15 @@
+{
+  "stage": "H",
+  "run_dir": "runs\\optim_pretrain_sonitude_dist_count_directional_1_5m",
+  "init_ckpt": "runs/optim_pretrain_sonitude_dist_count_1_5m/checkpoints/best.pt",
+  "promote_untouched": "C:\\Users\\darre\\Sound_Bubble_optim_distance\\runs\\optim_pretrain_sonitude_dist_count_1_5m",
+  "trainable_params": 11266,
+  "total_params": 243166,
+  "steps": 20,
+  "mean_loss": 653.5271193729714,
+  "gate": {
+    "name": "steered_head_train_dir_ready",
+    "passed": true,
+    "note": "Pass if directional run has best/last checkpoints and steered_head params train. Full SI-SDR gate vs bubble baseline requires overnight train_pt."
+  }
+}

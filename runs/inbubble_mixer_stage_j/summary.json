@@ -1,0 +1,65 @@
+{
+  "stage": "J",
+  "host_device": "cuda",
+  "hop_ms": 8.0,
+  "block_ms": 16.0,
+  "hops_per_io": 2,
+  "chunk": 192,
+  "promote_run": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+  "directional_run": "runs/optim_pretrain_sonitude_dist_count_directional_1_5m",
+  "directional_loaded": true,
+  "promote_bubble_ms": {
+    "mean_ms": 41.950648749116226,
+    "p50_ms": 37.35995000170078,
+    "p95_ms": 61.69377000333043,
+    "n": 80
+  },
+  "directional_steered_aux_ms": {
+    "mean_ms": 28.189663749799365,
+    "p50_ms": 27.208400002564304,
+    "p95_ms": 33.64213000095332,
+    "n": 80
+  },
+  "promote_within_budget": false,
+  "steered_within_budget": false,
+  "pi5": {
+    "pi5_available": false,
+    "pi5_ort_available": false,
+    "pi5_host": null,
+    "attempts": [
+      {
+        "host": "rpi5-soundbubble",
+        "reachable": false,
+        "ort_available": false,
+        "dns_ok": false,
+        "dns_error": "[Errno 11001] getaddrinfo failed"
+      },
+      {
+        "host": "raspberrypi.local",
+        "reachable": false,
+        "ort_available": false,
+        "dns_ok": false,
+        "dns_error": "[Errno 11001] getaddrinfo failed"
+      }
+    ],
+    "note": "Pi 5 / ORT device unavailable on this machine (no Tailscale MagicDNS / SSH reachability). Host torch proxy timing used instead; keep laptop-only directional zoom."
+  },
+  "timing_source": "host_torch_proxy",
+  "ship": {
+    "default_listen": "promote b_hat (g_k=1 / alpha=0)",
+    "steered_enabled_by_default": false,
+    "steered_affordable_on_this_host": false,
+    "mode": "laptop_only_directional_zoom",
+    "recommendation": "Pi 5 ORT unavailable \u2014 keep promote b_hat+g=1 default; steered remains laptop-only directional zoom until on-device re-bench.",
+    "promote_directional_requires_explicit_user_request": true,
+    "note_timing": "Torch full-block timing on this host is a proxy, not Pi 5 ORT. Stage E already showed multi-out wet decode exceeds budget; prefer one steered aux only after on-device re-bench.",
+    "pi5_ort_bench": "skipped_device_unavailable"
+  },
+  "gate": {
+    "name": "cost_gate_default_promote",
+    "passed": true,
+    "steered_ship_default": false,
+    "laptop_only_directional_zoom": true,
+    "note": "Pass if default remains promote b_hat and either steered fits the 16 ms block budget or we document laptop-only directional zoom."
+  }
+}

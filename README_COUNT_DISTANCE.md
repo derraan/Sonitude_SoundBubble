@@ -7,6 +7,23 @@ Optional aux head on the Raspberry Pi optim Sound Bubble model that reports:
 
 Audio separation behavior is unchanged when the head is enabled (frozen-backbone training).
 
+## Promoted 1.5 m model
+
+| Item | Path |
+|------|------|
+| **Default run** | `runs/optim_pretrain_sonitude_dist_count_1_5m` |
+| Config | `real_experiments/optim_pretrain_sonitude_dist_count_1_5m.json` (also live `runs/.../config.json`) |
+| Checkpoints | `best.pt` ≈ ep23 (val/loss); `last.pt` ≈ ep31 |
+| Progress UI | `canvases/promoted-epoch-progress.canvas.tsx` + `epoch_progress/` |
+| Guardrails | `GUARDRAILS.md`, `.cursor/rules/promoted-count-distance-model.mdc` |
+
+Init / eval / export / demos should use this path unless another run is named. Do **not** promote experimental dirs (e.g. `suppress_v1`) by renaming — copy weights into the promoted slot.
+
+Directional steered explore (separate run, never overwrites promote):
+
+- Config: `real_experiments/optim_pretrain_sonitude_dist_count_directional_1_5m.json`
+- Run dir: `runs/optim_pretrain_sonitude_dist_count_directional_1_5m`
+
 ## Scope
 
 - Model family only: `src.models.tfgridnet_realtime_clean_optim`
@@ -21,10 +38,11 @@ Each count–distance head run starts from the matching optim backbone checkpoin
 | Radius | Backbone `init_ckpt` | Config | Run dir |
 |--------|----------------------|--------|---------|
 | 1.0 m | `.../runs/optim_pretrain_1m/checkpoints/best.pt` | `real_experiments/count_distance_head_optim_1m.json` | `runs/count_distance_head_optim_1m` |
-| 1.5 m | `.../runs/optim_pretrain_1_5m/checkpoints/best.pt` (epoch 93) | `real_experiments/count_distance_head_optim_1_5m.json` | `runs/count_distance_head_optim_1_5m` |
+| 1.5 m | Prefer **promoted** `runs/optim_pretrain_sonitude_dist_count_1_5m/checkpoints/best.pt` | `real_experiments/optim_pretrain_sonitude_dist_count_1_5m.json` | `runs/optim_pretrain_sonitude_dist_count_1_5m` |
+| 1.5 m (legacy head-only) | `.../runs/optim_pretrain_1_5m/checkpoints/best.pt` (epoch 93) | `real_experiments/count_distance_head_optim_1_5m.json` | `runs/count_distance_head_optim_1_5m` |
 | 2.0 m | `.../runs/optim_pretrain_2m/checkpoints/best.pt` | `real_experiments/count_distance_head_optim_2m.json` | `runs/count_distance_head_optim_2m` |
 
-Optional joint fine-tune: `real_experiments/count_distance_head_optim_1_5m_joint.json`.
+Optional joint / suppress finetune (weight source only, not promoted): `real_experiments/count_distance_head_optim_1_5m_suppress_v1.json`.
 
 Configs keep backbone `model_params` aligned to the pretrain runs (`D=16`, `B=3`, `H=64`, `directional=false`, `spectral_masking=false`, …).
 
@@ -46,10 +64,40 @@ In `src/hl_modules/distance_based_hl_module.py` with `count_distance_head.enable
 - Logged/printed: `count_loss`, `count_acc`, `spk_distance_loss`, `spk_distance_mae`, `spk_activity_loss`
 - With `freeze_backbone: true`, SNRi/SI-SDRi are omitted from the epoch summary
 
+### Distance → dBFS sweep + passband ripple
+
+When `distance_sweep_val.enabled` is true, each epoch runs a LibriSpeech distance×RT60 level sweep (`src/validation/distance_sweep_dbfs.py`) and logs:
+
+| Metric | Meaning |
+|--------|---------|
+| `val/sweep_out_dbfs_*m` | Output level at fixed distances |
+| `val/sweep_passband_minus_far_db` | Near (0.8 m) − far (3.0 m); higher = clearer bubble contrast |
+| `val/sweep_edge_drop_1_5_to_2_0_db` | Edge sharpness at the bubble |
+| `val/sweep_passband_ripple_0_2_db` | **Passband ripple (dB)** on RT60 **0.2 s** |
+
+**Passband ripple definition:** peak−peak output dBFS for sources strictly inside the bubble (`d < bubble_m`) whose level is above −60 dBFS (active passband; excludes stopband→passband transition). Lower is better — less jittery / muffled perception near the 1.5 m threshold.
+
+**Train loss** (optional, under `distance_sweep_val.passband_ripple`):
+
+```json
+"passband_ripple": {
+  "w_passband_ripple": 0.05,
+  "every_n_train_steps": 10,
+  "rt60": 0.2
+}
+```
+
+Caches RT60=0.2 level-matched mixes once, then every N train steps adds `w * ripple_db` to the total loss. Requires a **trainable backbone** (`freeze_backbone: false`); otherwise the aux is skipped and only the val metric logs.
+
+CLI / plots: `scripts/distance_sweep_dbfs.py`, `scripts/plot_promoted_epoch_progress.py`. Progress canvas shows ripple as measurement cursors on the best-epoch RT60 overlay.
+
 ## Train
 
 ```powershell
 cd C:\Users\darre\Sound_Bubble_optim_distance
+# Promoted 1.5 m (preferred)
+python -m src.train_pt --config real_experiments\optim_pretrain_sonitude_dist_count_1_5m.json --run_dir runs\optim_pretrain_sonitude_dist_count_1_5m --no_wandb
+# Legacy radius configs
 python -m src.train_pt --config real_experiments\count_distance_head_optim_1_5m.json --run_dir runs\count_distance_head_optim_1_5m --no_wandb
 python -m src.train_pt --config real_experiments\count_distance_head_optim_1m.json   --run_dir runs\count_distance_head_optim_1m   --no_wandb
 python -m src.train_pt --config real_experiments\count_distance_head_optim_2m.json   --run_dir runs\count_distance_head_optim_2m   --no_wandb
@@ -61,7 +109,7 @@ python -m src.train_pt --config real_experiments\count_distance_head_optim_2m.js
 python -m src.eval_count_distance `
   C:/Users/darre/Sound_Bubble/datasets/syn_test/syn_1_5m/test `
   C:/Users/darre/Sound_Bubble/runs/optim_pretrain_1_5m `
-  runs/count_distance_head_optim_1_5m `
+  runs/optim_pretrain_sonitude_dist_count_1_5m `
   runs/count_distance_eval_1_5m `
   --distance_threshold 1.5 --use_cuda
 ```
@@ -71,7 +119,7 @@ Reports frame/clip count accuracy, slot distance MAE/RMSE/bias on active slots, 
 ## ONNX export / benchmark
 
 ```powershell
-python edge/export_to_onnx.py --run-dir runs/count_distance_head_optim_1_5m --output edge/zoo/optim_count_distance_1_5m.onnx --opset 9 --frames-for-check 3 --batch-size 1
+python edge/export_to_onnx.py --run-dir runs/optim_pretrain_sonitude_dist_count_1_5m --output edge/zoo/optim_count_distance_1_5m.onnx --opset 9 --frames-for-check 3 --batch-size 1
 python edge/benchmark.py --model edge/zoo/optim_count_distance_1_5m.onnx --contract-path edge/zoo/optim_count_distance_1_5m.runtime.json --runs 200 --warmup 30 --num-threads 4
 ```
 

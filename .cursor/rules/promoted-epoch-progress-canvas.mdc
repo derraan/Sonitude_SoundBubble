@@ -1,0 +1,21 @@
+---
+description: Lock layout of promoted-model epoch progress canvas; do not reshuffle sections or break dBFS axes
+globs: "**/promoted-epoch-progress.canvas.tsx,**/PROGRESS_CANVAS_LAYOUT.md,**/epoch_progress/**"
+alwaysApply: true
+---
+
+# Promoted epoch-progress canvas layout lock
+
+Canonical canvas: `canvases/promoted-epoch-progress.canvas.tsx`  
+Guardrail doc: `runs/optim_pretrain_sonitude_dist_count_1_5m/epoch_progress/PROGRESS_CANVAS_LAYOUT.md`
+
+When updating progress for `optim_pretrain_sonitude_dist_count_1_5m`:
+
+1. **Do not reorder, rename, or remove** the fixed section sequence in the guardrail doc.
+2. **Update data only** (series arrays, stats, snapshot table, epoch pills). Keep section titles and chart types.
+3. **Never use canvas `LineChart`/`BarChart` for dBFS or largely negative losses** — they collapse negative domains. Use the existing SVG helpers (`LineSvg`, `DistanceDbfsSvg`).
+4. Distance→dBFS plots must keep official axes: **X far→near (3.0→0.5 m)**, **Y signal level (dBFS) ~−20…−95**, input ≈ −25, bubble line at 1.5 m, RT60 overlays.
+5. Keep **passband ripple cursors** on the best-epoch RT60 0.2 s overlay (max/min + ΔdB for `d < bubble` and level > −60 dBFS); refresh the labeled Δ when sweep data changes.
+6. After weight copy into the promoted slot, refresh this canvas + `epoch_progress/` PNGs/CSV; do not invent a second progress UI layout.
+
+If a new metric is required, append under the matching existing H2 (or add a subsection via H3) — do not invent a new top-level flow.

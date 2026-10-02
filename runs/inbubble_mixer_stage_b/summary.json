@@ -1,0 +1,57 @@
+{
+  "stage": "B",
+  "n_train": 48,
+  "n_val": 16,
+  "history": [
+    {
+      "epoch": 0,
+      "train_loss": 0.5246069480975469
+    },
+    {
+      "epoch": 1,
+      "train_loss": -0.10692340632279713
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.1969186713298162
+    },
+    {
+      "epoch": 3,
+      "train_loss": -0.09282151609659195
+    },
+    {
+      "epoch": 4,
+      "train_loss": -0.24226759870847067
+    },
+    {
+      "epoch": 5,
+      "train_loss": -0.20365850627422333
+    },
+    {
+      "epoch": 6,
+      "train_loss": -0.3784293681383133
+    },
+    {
+      "epoch": 7,
+      "train_loss": -0.13234571367502213
+    }
+  ],
+  "oracle_bubble_eval": {
+    "mean_stream_sisdr": 0.3293513901145692,
+    "mean_boost": 10.498273499881703,
+    "mean_cut": 5.856080516279439,
+    "mean_cons": 1.0002025162619136e-06
+  },
+  "model_bhat_eval": {
+    "mean_stream_sisdr": -7.602730096773907,
+    "mean_boost": 1.6566011464707056,
+    "mean_cut": -8.05022855292555,
+    "mean_cons": 1.0000627117170052e-06
+  },
+  "gate": {
+    "name": "non_oracle_streams_stable_control",
+    "passed": true,
+    "model_transfer_ok": false,
+    "note": "Pass if K=2 soft-mask probe on oracle bubble yields boost/cut control SI-SDR > 3 dB with low mix residual. Model-b_hat transfer reported separately."
+  }
+}

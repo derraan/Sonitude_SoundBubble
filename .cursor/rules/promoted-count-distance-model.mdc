@@ -1,0 +1,31 @@
+﻿---
+description: Promote optim_pretrain_sonitude_dist_count_1_5m as current Sound Bubble count/distance model; ignore runs/old
+alwaysApply: true
+---
+
+# Promoted model for Sound Bubble count + distance
+
+## Current promoted checkpoint
+
+- **Path:** `runs/optim_pretrain_sonitude_dist_count_1_5m`
+- **Checkpoint status (2026-10-02):** `best.pt` = **ep23** (val/loss); `last.pt` = **ep31** (metrics through ep30).
+- **Composition / lineage:** ep93 audio + ep46 heads transplant → suppress_v1 finetune copy into this slot → continued joint train here.
+- **Important:** `suppress_v1` is **not** the promoted model — only a historical weight source. The promoted artifact is always this path.
+- **Prior transplant-only archive:** `runs/archived_promoted_pre_suppress_v1`
+- **Former path:** `runs/ep93_audio_ep46_heads` (do not use for new work)
+- **Progress UI:** refresh `epoch_progress/` + `canvases/promoted-epoch-progress.canvas.tsx` after training (layout locked).
+
+## Rules for future work
+
+1. **Default init / eval / export / demos / deployment** to `runs/optim_pretrain_sonitude_dist_count_1_5m` unless the user names another run.
+2. **Do not** treat anything under `runs/old/` as current (deferred stopband experiments).
+3. New training iterations should typically **`init_ckpt` from** `runs/optim_pretrain_sonitude_dist_count_1_5m/checkpoints/best.pt`.
+4. Treat this as the conceptual improved Sonitude 1.5 m model for further training and deployment.
+5. **Do not** promote experimental run dirs (e.g. `suppress_v1`) by renaming them; copy weights into this promoted path instead.
+
+## Not promoted (context only)
+
+- `runs/old/*` — deferred stopband / failed recover paths
+- `runs/archived_stopband_v2_ep46` — ep46 weights archive for head reuse only
+- `runs/archived_promoted_pre_suppress_v1` — prior transplant-only snapshot of this slot
+- `runs/count_distance_head_optim_1_5m_suppress_v1` — experimental finetune (weight source only; not promoted)

@@ -1,0 +1,19 @@
+{
+  "stage": "D",
+  "n_samples": 40,
+  "stable_embedding_tracker": {
+    "mean_pause_hold_rate": 1.0,
+    "mean_post_cross_swap_error_rate": 0.0
+  },
+  "doa_only_ablation": {
+    "mean_pause_hold_rate": 1.0,
+    "mean_post_cross_swap_error_rate": 1.0
+  },
+  "pause_ms": 800.0,
+  "gate": {
+    "name": "session_id_continuity",
+    "passed": true,
+    "doa_only_insufficient": true,
+    "note": "Pass if stable-embedding tracker holds IDs across pause/motion. DOA-only ablation is expected to fail under crossing \u2014 embeddings required for Speaker 1/2 persistence."
+  }
+}

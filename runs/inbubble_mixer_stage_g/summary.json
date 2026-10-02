@@ -1,0 +1,31 @@
+{
+  "stage": "G",
+  "run_dir_promote": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+  "dataset_root": "C:\\Users\\darre\\Sound_Bubble\\datasets\\syn_libri_1_5m_rt60",
+  "n_samples": 40,
+  "beta_priors": {
+    "sigma": 0.2,
+    "rho": 8.0,
+    "theta0_grid_deg": [
+      -90.0,
+      -60.0,
+      -30.0,
+      0.0,
+      30.0,
+      60.0,
+      90.0
+    ],
+    "dis_threshold": 1.5,
+    "note": "Frozen Stage G priors for Stage H directional training."
+  },
+  "follow_theta0_rate": 0.75,
+  "outside_weight_zero_rate": 1.0,
+  "mean_steered_vs_hard_bubble_sisdr": 0.06170114244867748,
+  "gate": {
+    "name": "oracle_steered_mixes_follow_theta0",
+    "follow_rate": 0.75,
+    "outside_suppressed": true,
+    "passed": true,
+    "note": "Pass if product-weighted steered mixes audibly follow \u03b80 (speaker nearer look direction wins SI-SDR) and outside weights stay 0."
+  }
+}

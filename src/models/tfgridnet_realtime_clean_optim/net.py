@@ -24,7 +24,8 @@ class Net(nn.Module):
                  E = 4, chunk_causal=False, num_src = 1,
                  spectral_masking=False, use_first_ln=False, merge_method = "None",
                  directional = False, conv_lstm = True, lstm_down=5, fb_type='stft',
-                 count_distance_head=None, distance_head=None, speaker_head=None):
+                 count_distance_head=None, distance_head=None, speaker_head=None,
+                 steered_head=None):
         super(Net, self).__init__()
         self.stft_chunk_size = stft_chunk_size
         self.stft_pad_size = stft_pad_size
@@ -73,18 +74,19 @@ class Net(nn.Module):
                                    conv_lstm = conv_lstm,
                                    lstm_down=lstm_down,
                                    fb_type=fb_type,
-                                   count_distance_head=count_distance_head)
+                                   count_distance_head=count_distance_head,
+                                   steered_head=steered_head)
 
     def init_buffers(self, batch_size, device):
         return self.tfgridnet.init_buffers(batch_size, device)
 
-    def predict(self, x, input_state, pad=True):
+    def predict(self, x, input_state, pad=True, theta0_rad=None):
         mod = 0
         if pad:
             pad_size = (self.stft_back_pad, self.stft_pad_size) if self.lookahead else (0, 0)
             x, mod = mod_pad(x, chunk_size=self.stft_chunk_size, pad=pad_size)
 
-        pred = self.tfgridnet(x, input_state)
+        pred = self.tfgridnet(x, input_state, theta0_rad=theta0_rad)
         if len(pred) == 2:
             x, next_state = pred
             aux_outputs = None
@@ -94,6 +96,10 @@ class Net(nn.Module):
         
         if mod != 0:
             x = x[:, :, :-mod]
+            if aux_outputs is not None and "steered_output" in aux_outputs:
+                s = aux_outputs["steered_output"]
+                if s.shape[-1] > x.shape[-1]:
+                    aux_outputs["steered_output"] = s[..., : x.shape[-1]]
 
         return x, next_state, aux_outputs
 
@@ -103,7 +109,15 @@ class Net(nn.Module):
         if input_state is None:
             input_state = self.init_buffers(x.shape[0], x.device)
 
-        x, next_state, aux_outputs = self.predict(x, input_state, pad)
+        theta0 = inputs.get("theta0_rad", None)
+        if theta0 is not None and not torch.is_tensor(theta0):
+            theta0 = torch.as_tensor(theta0, device=x.device, dtype=x.dtype)
+        if theta0 is not None:
+            theta0 = theta0.to(device=x.device, dtype=x.dtype)
+            if theta0.dim() == 0:
+                theta0 = theta0.expand(x.shape[0])
+
+        x, next_state, aux_outputs = self.predict(x, input_state, pad, theta0_rad=theta0)
         outputs = {'output': x, 'next_state': next_state}
         if aux_outputs is not None:
             outputs.update(aux_outputs)

@@ -48,13 +48,16 @@ class PLModule(object):
                  scheduler=None, scheduler_params=None,
                  loss=None, loss_params=None, 
                  metrics=[], init_ckpt=None,
+                 init_head_ckpt=None,
                  grad_clip = None,
                  use_dp=True,
                  val_log_interval=10, # Unused, only kept for compatibility TODO: Remove
                  samples_per_speaker_number=3,
                  count_distance_head=None,
                  distance_head=None,
-                 speaker_head=None):
+                 speaker_head=None,
+                 steered_head=None,
+                 distance_sweep_val=None):
 
         if distance_head is not None and distance_head.get("enabled", False):
             raise ValueError(
@@ -69,12 +72,22 @@ class PLModule(object):
         self.count_distance_head_enabled = bool(self.count_distance_head_cfg.get('enabled', False))
         self.distance_head_enabled = False
 
-        self.freeze_backbone = bool(self.count_distance_head_cfg.get('freeze_backbone', False))
+        self.steered_head_cfg = steered_head or {}
+        self.steered_head_enabled = bool(self.steered_head_cfg.get('enabled', False))
+        self.steered_loss_weight = float(self.steered_head_cfg.get('w_steered', 1.0))
+        # When steered training freezes backbone, count head is also frozen unless
+        # train_count_heads is explicitly true.
+        self.steered_train_count_heads = bool(self.steered_head_cfg.get('train_count_heads', False))
+
+        self.freeze_backbone = bool(
+            self.count_distance_head_cfg.get('freeze_backbone', False)
+            or self.steered_head_cfg.get('freeze_backbone', False)
+        )
         self.count_loss_weight = float(self.count_distance_head_cfg.get('w_count', 1.0))
         self.spk_distance_loss_weight = float(self.count_distance_head_cfg.get('w_distance', 1.0))
         self.spk_activity_loss_weight = float(self.count_distance_head_cfg.get('w_activity', 0.2))
         self.spk_vad_threshold_db = float(self.count_distance_head_cfg.get('vad_threshold_db', -35.0))
-        self.has_aux_heads = bool(self.count_distance_head_enabled)
+        self.has_aux_heads = bool(self.count_distance_head_enabled or self.steered_head_enabled)
 
         model_params = dict(model_params)
         if self.count_distance_head_enabled:
@@ -83,6 +96,10 @@ class PLModule(object):
             model_params["count_distance_head"] = model_cd_cfg
             model_params.pop("distance_head", None)
             model_params.pop("speaker_head", None)
+        if self.steered_head_enabled:
+            model_st_cfg = dict(model_params.get("steered_head") or {})
+            model_st_cfg.setdefault("enabled", True)
+            model_params["steered_head"] = model_st_cfg
 
         self.model = utils.import_attr(model)(**model_params)
         self.use_dp = use_dp
@@ -137,7 +154,7 @@ class PLModule(object):
                     _model = self.model
                 
                 mdl = FakeModel(_model)
-                if self.count_distance_head_enabled:
+                if self.count_distance_head_enabled or self.steered_head_enabled:
                     missing, unexpected = mdl.load_state_dict(state, strict=False)
                     missing_backbone = [k for k in missing if not self._is_head_key(k)]
                     unexpected_backbone = [k for k in unexpected if not self._is_head_key(k)]
@@ -153,6 +170,43 @@ class PLModule(object):
             else:
                 state = torch.load(init_ckpt)['model']
                 self._load_init_state(state)
+
+        # Overlay count/distance head weights from a second checkpoint (e.g. ep93
+        # backbone + later head-only or joint-head checkpoint).
+        if init_head_ckpt is not None:
+            if not self.count_distance_head_enabled:
+                raise ValueError("init_head_ckpt requires count_distance_head.enabled=true")
+            head_blob = torch.load(init_head_ckpt, map_location="cpu")
+            head_state = head_blob["model"] if isinstance(head_blob, dict) and "model" in head_blob else head_blob
+            self._load_head_state(head_state)
+            print(f"Loaded count/distance head weights from {init_head_ckpt}")
+
+        self.distance_sweep_val_cfg = distance_sweep_val or {}
+        self.distance_sweep_val_enabled = bool(self.distance_sweep_val_cfg.get("enabled", False))
+
+        # Passband ripple (RT60≈0.2): val metric always logged with sweep;
+        # train aux loss when w_passband_ripple > 0 (needs trainable backbone).
+        pr_cfg = self.distance_sweep_val_cfg.get("passband_ripple") or {}
+        self.passband_ripple_w = float(
+            pr_cfg.get("w_passband_ripple", self.distance_sweep_val_cfg.get("w_passband_ripple", 0.0))
+        )
+        self.passband_ripple_every_n = int(
+            pr_cfg.get("every_n_train_steps", self.distance_sweep_val_cfg.get("passband_ripple_every_n_steps", 10))
+        )
+        self.passband_ripple_rt60 = float(pr_cfg.get("rt60", 0.2))
+        self.passband_ripple_bubble_m = float(
+            pr_cfg.get("bubble_m", self.distance_sweep_val_cfg.get("bubble_m", 1.5))
+        )
+        self.passband_ripple_distances = pr_cfg.get("distances") or self.distance_sweep_val_cfg.get("distances")
+        self._passband_mix_cache = None  # lazy: Tensor [N, 6, T] on CPU
+        self._passband_mix_distances = None
+        self._passband_train_step = 0
+        if self.passband_ripple_w > 0.0 and self.freeze_backbone:
+            print(
+                "[passband_ripple] w_passband_ripple>0 but freeze_backbone=True — "
+                "train ripple loss is skipped until backbone is trainable; "
+                "val/sweep_passband_ripple_0_2_db still logs from distance sweep."
+            )
 
         if self.freeze_backbone:
             self._freeze_backbone_for_heads()
@@ -187,9 +241,13 @@ class PLModule(object):
         # Accept legacy speaker_head.* keys from older checkpoints.
         return ("count_distance_head" in key) or ("speaker_head" in key)
 
+    @staticmethod
+    def _is_steered_head_key(key: str) -> bool:
+        return "steered_head" in key
+
     @classmethod
     def _is_head_key(cls, key: str) -> bool:
-        return cls._is_count_distance_head_key(key)
+        return cls._is_count_distance_head_key(key) or cls._is_steered_head_key(key)
 
     @staticmethod
     def _remap_legacy_head_keys(state_dict: dict) -> dict:
@@ -205,7 +263,7 @@ class PLModule(object):
     def _load_init_state(self, state_dict):
         model = self._inner_model()
         state_dict = self._remap_legacy_head_keys(state_dict)
-        if not self.count_distance_head_enabled:
+        if not (self.count_distance_head_enabled or self.steered_head_enabled):
             model.load_state_dict(state_dict)
             return
 
@@ -219,14 +277,39 @@ class PLModule(object):
                 f"Unexpected backbone keys: {unexpected_backbone[:5]}"
             )
 
+    def _load_head_state(self, state_dict):
+        """Load only count_distance_head / legacy speaker_head keys into the model."""
+        model = self._inner_model()
+        state_dict = self._remap_legacy_head_keys(state_dict)
+        head_only = {k: v for k, v in state_dict.items() if self._is_head_key(k)}
+        if not head_only:
+            raise RuntimeError("init_head_ckpt contained no count_distance_head / speaker_head keys.")
+        missing, unexpected = model.load_state_dict(head_only, strict=False)
+        missing_heads = [k for k in missing if self._is_head_key(k)]
+        if missing_heads:
+            raise RuntimeError(
+                "Head load incomplete for init_head_ckpt. "
+                f"Missing head keys: {missing_heads[:8]}"
+            )
+        unexpected_heads = [k for k in unexpected if self._is_head_key(k)]
+        if unexpected_heads:
+            raise RuntimeError(
+                "Unexpected head keys while loading init_head_ckpt: "
+                f"{unexpected_heads[:8]}"
+            )
+
     def _freeze_backbone_for_heads(self):
         total = 0
         trainable = 0
         for name, param in self.model.named_parameters():
-            is_head = self._is_head_key(name)
-            param.requires_grad = is_head
+            if self.steered_head_enabled and not self.steered_train_count_heads:
+                # Stage H default: only train steered_head; freeze backbone + count head.
+                trainable_key = self._is_steered_head_key(name)
+            else:
+                trainable_key = self._is_head_key(name)
+            param.requires_grad = trainable_key
             total += param.numel()
-            if is_head:
+            if trainable_key:
                 trainable += param.numel()
         print(f"[aux_head] backbone frozen. trainable params: {trainable}/{total}")
 
@@ -315,6 +398,93 @@ class PLModule(object):
         except Exception:
             return default
 
+    def _ensure_passband_mix_cache(self):
+        if self._passband_mix_cache is not None:
+            return
+        from src.validation.distance_sweep_dbfs import build_passband_mix_cache
+
+        cfg = self.distance_sweep_val_cfg
+        mixes, dists = build_passband_mix_cache(
+            speech_path=cfg.get(
+                "speech_path",
+                r"C:\Users\darre\Sound_Bubble\datasets\_speech_cache\5694-64038-0000.flac",
+            ),
+            distances=self.passband_ripple_distances,
+            bubble_m=self.passband_ripple_bubble_m,
+            rt60=self.passband_ripple_rt60,
+            target_in_dbfs=float(cfg.get("target_in_dbfs", -25.0)),
+            sr=int(cfg.get("sr", self.sr)),
+            dur_s=float(cfg.get("dur_s", 2.0)),
+        )
+        self._passband_mix_cache = mixes  # CPU float32 [N, 6, T]
+        self._passband_mix_distances = dists
+        print(
+            f"[passband_ripple] cached {len(dists)} mixes "
+            f"(RT60={self.passband_ripple_rt60}s, d<={max(dists):.2f}m, "
+            f"w={self.passband_ripple_w}, every_n={self.passband_ripple_every_n})"
+        )
+
+    def _compute_passband_ripple_loss(self):
+        """Differentiable peak−peak dBFS ripple on RT60≈0.2 passband mixes."""
+        from src.validation.distance_sweep_dbfs import db_fs_torch, passband_ripple_torch
+
+        self._ensure_passband_mix_cache()
+        device = next(self._inner_model().parameters()).device
+        mixes = self._passband_mix_cache.to(device=device, non_blocking=True)
+        out = self.model({"mixture": mixes})["output"]
+        levels = db_fs_torch(out)
+        return passband_ripple_torch(levels)
+
+    def _run_and_log_distance_sweep_val(self, best_path):
+        """Epoch-end LibriSpeech distance→dBFS sweep (validation monitor)."""
+        from src.validation.distance_sweep_dbfs import run_distance_sweep, write_sweep_csv
+
+        cfg = self.distance_sweep_val_cfg
+        device = next(self._inner_model().parameters()).device
+        # DataParallel forward expects the wrapped module.
+        model = self.model
+        bubble_m = float(cfg.get("bubble_m", 1.5))
+        sweep = run_distance_sweep(
+            model,
+            device=str(device),
+            speech_path=cfg.get(
+                "speech_path",
+                r"C:\Users\darre\Sound_Bubble\datasets\_speech_cache\5694-64038-0000.flac",
+            ),
+            distances=cfg.get("distances"),
+            rt60_list=cfg.get("rt60_list"),
+            target_in_dbfs=float(cfg.get("target_in_dbfs", -25.0)),
+            bubble_m=bubble_m,
+            sr=int(cfg.get("sr", self.sr)),
+            dur_s=float(cfg.get("dur_s", 2.0)),
+        )
+        summary = sweep["summary"]
+        ripple = summary.get("passband_ripple_0_2_db", float("nan"))
+        print(
+            "[VAL distance-dBFS sweep] "
+            f"0.5m={summary['out_dbfs_0_5m']:.1f}  "
+            f"0.8m={summary['out_dbfs_0_8m']:.1f}  "
+            f"1.0m={summary['out_dbfs_1_0m']:.1f}  "
+            f"1.2m={summary['out_dbfs_1_2m']:.1f}  "
+            f"1.5m={summary['out_dbfs_1_5m']:.1f}  "
+            f"2.0m={summary['out_dbfs_2_0m']:.1f}  "
+            f"3.0m={summary['out_dbfs_3_0m']:.1f}  "
+            f"pass-far={summary['passband_minus_far_db']:.1f}dB  "
+            f"edge(1.5->2.0)={summary['edge_drop_1_5_to_2_0_db']:.1f}dB  "
+            f"passband_ripple_0.2={ripple:.1f}dB  "
+            f"(bubble={bubble_m}m)"
+        )
+        for key, value in summary.items():
+            self.log_metric(f"val/sweep_{key}", float(value), batch_size=1, on_step=False, on_epoch=True)
+
+        run_dir = os.path.dirname(os.path.dirname(os.path.abspath(best_path)))
+        sweep_dir = os.path.join(run_dir, "val_distance_sweep")
+        os.makedirs(sweep_dir, exist_ok=True)
+        csv_path = os.path.join(sweep_dir, f"epoch_{self.epoch:03d}.csv")
+        write_sweep_csv(csv_path, sweep)
+        # Keep a rolling "latest" copy for quick inspection.
+        write_sweep_csv(os.path.join(sweep_dir, "latest.csv"), sweep)
+
     def on_epoch_end(self, best_path, wandb_run):
         assert self.epoch + 1 == len(self.metric_values), \
             "Current epoch must be equal to length of metrics (0-indexed)"
@@ -344,6 +514,9 @@ class PLModule(object):
         if save:
             print("Current checkpoint is the best! Saving it...")
             self.dump_state(best_path)
+
+        if self.distance_sweep_val_enabled:
+            self._run_and_log_distance_sweep_val(best_path)
         
         val_loss = self._try_get_avg_metric_at_epoch('val/loss')
         print(f'Val loss: {val_loss:.04f}')
@@ -485,6 +658,7 @@ class PLModule(object):
         spk_distance_loss = est.new_tensor(0.0)
         spk_distance_mae = est.new_tensor(0.0)
         spk_activity_loss = est.new_tensor(0.0)
+        steered_loss = est.new_tensor(0.0)
 
         if self.count_distance_head_enabled:
             required_keys = ("speaker_count_logits", "spk_distance_m")
@@ -569,6 +743,38 @@ class PLModule(object):
                     + self.spk_activity_loss_weight * spk_activity_loss
                 )
 
+        if self.steered_head_enabled:
+            if "steered_output" not in outputs:
+                raise RuntimeError("Steered head enabled but model outputs miss steered_output.")
+            if "target_steered" not in targets:
+                raise RuntimeError("Steered head enabled but targets miss target_steered.")
+            z_hat = outputs["steered_output"]
+            z_gt = targets["target_steered"].to(z_hat.device)
+            # Align lengths (pad path / ISTFT edge).
+            t = min(z_hat.shape[-1], z_gt.shape[-1], est.shape[-1])
+            z_hat = z_hat[..., :t]
+            z_gt = z_gt[..., :t]
+            if z_hat.ndim == 2:
+                z_hat = z_hat.unsqueeze(1)
+            if z_gt.ndim == 2:
+                z_gt = z_gt.unsqueeze(1)
+            steered_loss = self.loss_fn(est=z_hat, gt=z_gt).mean()
+            if self.freeze_backbone and not self.steered_train_count_heads:
+                loss = self.steered_loss_weight * steered_loss
+            elif self.freeze_backbone:
+                loss = loss + self.steered_loss_weight * steered_loss
+            else:
+                loss = loss + self.steered_loss_weight * steered_loss
+
+        # Passband ripple aux (RT60≈0.2 peak−peak dBFS inside bubble). Lower is better.
+        # Only applied when weight > 0 and backbone is trainable (affects main output).
+        passband_ripple_loss = est.new_tensor(0.0)
+        if self.passband_ripple_w > 0.0 and step == "train" and not self.freeze_backbone:
+            self._passband_train_step += 1
+            if self._passband_train_step % max(1, self.passband_ripple_every_n) == 0:
+                passband_ripple_loss = self._compute_passband_ripple_loss()
+                loss = loss + self.passband_ripple_w * passband_ripple_loss
+
         est_detached = est.detach().clone()
         
         
@@ -582,6 +788,18 @@ class PLModule(object):
                 self.log_metric(f'{step}/spk_distance_loss', spk_distance_loss.item(), batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
                 self.log_metric(f'{step}/spk_distance_mae', spk_distance_mae.item(), batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
                 self.log_metric(f'{step}/spk_activity_loss', spk_activity_loss.item(), batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+            if self.steered_head_enabled:
+                self.log_metric(f'{step}/steered_loss', steered_loss.item(), batch_size=batch_size, on_step=(step == 'train'), on_epoch=True, prog_bar=True, sync_dist=True)
+            if self.passband_ripple_w > 0.0 and step == "train" and passband_ripple_loss.item() != 0.0:
+                self.log_metric(
+                    f'{step}/passband_ripple_db',
+                    passband_ripple_loss.item(),
+                    batch_size=1,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    sync_dist=True,
+                )
 
             # Log metrics
             for metric in self.metrics:

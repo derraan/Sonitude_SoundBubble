@@ -1,0 +1,401 @@
+{
+  "promoted_model": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+  "directional_model": "runs/optim_pretrain_sonitude_dist_count_directional_1_5m",
+  "architecture": "additive mixer on promoted b_hat; DSENet beta sector on directional run",
+  "mix_rule": "y = b_hat + sum (g_k - 1) * s_hat_k ; y=(1-a)*b_hat + a*z_hat",
+  "stages": {
+    "a": {
+      "passed": true,
+      "note": "Pass if g=1 recovers b_hat, oracle leak=0 control matches clean mix, boosting speaker0 raises s0 SI-SDR vs cutting it, and leakage degrades control."
+    },
+    "b": {
+      "passed": true,
+      "note": "Pass if K=2 soft-mask probe on oracle bubble yields boost/cut control SI-SDR > 3 dB with low mix residual. Model-b_hat transfer reported separately."
+    },
+    "c": {
+      "passed": true,
+      "note": "Pass if ear-pair GCC-PHAT gets L/R sign >=65% and >=40% of 2-speaker scenes are separable by a \u00b130\u00b0 angular region. Not a full-azimuth UCA claim."
+    },
+    "d": {
+      "passed": true,
+      "note": "Pass if stable-embedding tracker holds IDs across pause/motion. DOA-only ablation is expected to fail under crossing \u2014 embeddings required for Speaker 1/2 persistence."
+    },
+    "e": {
+      "passed": false,
+      "note": "Pass if multi-out mean infer (77.52 ms) fits 2 hops in 16.0 ms block. Host CPU proxy \u2014 re-measure on Pi 5 before deploy."
+    },
+    "f": {
+      "passed": true,
+      "note": "Pass if g=1 is exact pass-through and non-unity gains change output. Wired behind --inbubble-mixer."
+    },
+    "g": {
+      "passed": true,
+      "note": "Pass if product-weighted steered mixes audibly follow \u03b80 (speaker nearer look direction wins SI-SDR) and outside weights stay 0."
+    },
+    "h": {
+      "passed": true,
+      "note": "Pass if directional run has best/last checkpoints and steered_head params train. Full SI-SDR gate vs bubble baseline requires overnight train_pt."
+    },
+    "i": {
+      "passed": true,
+      "note": "Pass if g=1 still recovers promote b_hat and \u03b2-weighted gains match or beat blind softmask on s0 boost / s1 leakage when \u03b80 known."
+    },
+    "j": {
+      "passed": true,
+      "note": "Pass if default remains promote b_hat and either steered fits the 16 ms block budget or we document laptop-only directional zoom."
+    }
+  },
+  "product_blockers": [
+    "Stage E: multi-out wet path exceeds 16 ms block budget on host proxy; keep mixer default pass-through (g_k=1) until Pi 5 re-measure / lighter split.",
+    "Stage B: soft-mask transfer onto promoted b_hat is weak; oracle-bubble split works, model-b_hat cut/boost control is not yet product-ready.",
+    "Stage D: DOA-only IDs fail under crossing; stable speaker embeddings required for Speaker 1/2.",
+    "Stage J: steered aux not enabled by default; ship promote b_hat until Pi 5 confirms budget (laptop-only directional zoom OK)."
+  ],
+  "deploy_recommendation": "Ship promoted bubble unchanged as default listen. Directional steered head lives under \u2026_directional_1_5m; enable only if Stage J budget holds. Promote directional -> default only on explicit user request (copy/promote workflow).",
+  "all_gates_passed": false,
+  "details": {
+    "a": {
+      "stage": "A",
+      "run_dir": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+      "dataset_root": "C:\\Users\\darre\\Sound_Bubble\\datasets\\syn_libri_1_5m_rt60",
+      "n_samples": 16,
+      "identity_recoveries": 16,
+      "identity_rate": 1.0,
+      "mean_bubble_sisdr": 0.7582603324328958,
+      "oracle_ctrl_sisdr_vs_leak": {
+        "0.0": {
+          "mean": 111.16637865881808,
+          "p25": 108.47783485860501,
+          "p75": 114.89181424266242,
+          "n": 96
+        },
+        "0.1": {
+          "mean": 21.541797024375686,
+          "p25": 18.911072442227116,
+          "p75": 24.043831332852193,
+          "n": 96
+        },
+        "0.25": {
+          "mean": 12.752940494341408,
+          "p25": 10.086779446447496,
+          "p75": 15.580482311175922,
+          "n": 96
+        },
+        "0.5": {
+          "mean": 4.988825423996865,
+          "p25": 2.3766588655547625,
+          "p75": 9.239094491921158,
+          "n": 96
+        },
+        "1.0": {
+          "mean": -15.920802809869302,
+          "p25": -37.69948737806938,
+          "p75": 2.568187617536964,
+          "n": 96
+        }
+      },
+      "mean_s0_sisdr_boost_g2": 6.627275211676924,
+      "mean_s0_sisdr_cut_g0p25": -11.432662061923676,
+      "gate": {
+        "name": "oracle_streams_enable_useful_control",
+        "identity_ok": true,
+        "leak0_ctrl_sisdr": 111.16637865881808,
+        "leak_high_ctrl_sisdr": -15.920802809869302,
+        "boost_beats_cut_on_s0": true,
+        "passed": true,
+        "note": "Pass if g=1 recovers b_hat, oracle leak=0 control matches clean mix, boosting speaker0 raises s0 SI-SDR vs cutting it, and leakage degrades control."
+      }
+    },
+    "b": {
+      "stage": "B",
+      "n_train": 48,
+      "n_val": 16,
+      "history": [
+        {
+          "epoch": 0,
+          "train_loss": 0.5246069480975469
+        },
+        {
+          "epoch": 1,
+          "train_loss": -0.10692340632279713
+        },
+        {
+          "epoch": 2,
+          "train_loss": 0.1969186713298162
+        },
+        {
+          "epoch": 3,
+          "train_loss": -0.09282151609659195
+        },
+        {
+          "epoch": 4,
+          "train_loss": -0.24226759870847067
+        },
+        {
+          "epoch": 5,
+          "train_loss": -0.20365850627422333
+        },
+        {
+          "epoch": 6,
+          "train_loss": -0.3784293681383133
+        },
+        {
+          "epoch": 7,
+          "train_loss": -0.13234571367502213
+        }
+      ],
+      "oracle_bubble_eval": {
+        "mean_stream_sisdr": 0.3293513901145692,
+        "mean_boost": 10.498273499881703,
+        "mean_cut": 5.856080516279439,
+        "mean_cons": 1.0002025162619136e-06
+      },
+      "model_bhat_eval": {
+        "mean_stream_sisdr": -7.602730096773907,
+        "mean_boost": 1.6566011464707056,
+        "mean_cut": -8.05022855292555,
+        "mean_cons": 1.0000627117170052e-06
+      },
+      "gate": {
+        "name": "non_oracle_streams_stable_control",
+        "passed": true,
+        "model_transfer_ok": false,
+        "note": "Pass if K=2 soft-mask probe on oracle bubble yields boost/cut control SI-SDR > 3 dB with low mix residual. Model-b_hat transfer reported separately."
+      }
+    },
+    "c": {
+      "stage": "C",
+      "geometry": "vertical_arc_headphone_xz",
+      "n_samples": 80,
+      "doa_abs_err_mean_deg": 86.43587497363058,
+      "doa_abs_err_median_deg": 82.3318304874833,
+      "lr_sign_accuracy": 1.0,
+      "region30_separable_rate": 0.9,
+      "mean_inside_angle_separation_deg": 97.0380018143542,
+      "gate": {
+        "name": "useful_LR_region_control",
+        "passed": true,
+        "note": "Pass if ear-pair GCC-PHAT gets L/R sign >=65% and >=40% of 2-speaker scenes are separable by a \u00b130\u00b0 angular region. Not a full-azimuth UCA claim."
+      }
+    },
+    "d": {
+      "stage": "D",
+      "n_samples": 40,
+      "stable_embedding_tracker": {
+        "mean_pause_hold_rate": 1.0,
+        "mean_post_cross_swap_error_rate": 0.0
+      },
+      "doa_only_ablation": {
+        "mean_pause_hold_rate": 1.0,
+        "mean_post_cross_swap_error_rate": 1.0
+      },
+      "pause_ms": 800.0,
+      "gate": {
+        "name": "session_id_continuity",
+        "passed": true,
+        "doa_only_insufficient": true,
+        "note": "Pass if stable-embedding tracker holds IDs across pause/motion. DOA-only ablation is expected to fail under crossing \u2014 embeddings required for Speaker 1/2 persistence."
+      }
+    },
+    "e": {
+      "stage": "E",
+      "hop_ms": 8.0,
+      "block_ms": 16.0,
+      "hops_per_io": 2,
+      "torch_bubble_only_ms": {
+        "mean_ms": 295.57830666696344,
+        "std_ms": 91.08453955908801,
+        "p95_ms": 418.95413999955053,
+        "input_shape": [
+          1,
+          6,
+          192
+        ]
+      },
+      "torch_multi_out_ms": {
+        "mean_ms": 77.52401999993405,
+        "std_ms": 32.01983072611555,
+        "p95_ms": 133.47522999993083,
+        "input_shape": [
+          1,
+          6,
+          384
+        ]
+      },
+      "torch_splitter_only_ms": {
+        "mean_ms": 5.712093333325659,
+        "std_ms": 0.6122818433044583,
+        "p95_ms": 6.697660001191252
+      },
+      "splitter_onnx_path": null,
+      "ort_splitter_ms": null,
+      "export_error": "SymbolicValueError('STFT does not currently support complex types  [Caused by the value \\'61 defined in (%61 : Float(*, *, strides=[896, 1], requires_grad=0, device=cpu) = onnx::Reshape[allowzero=0](%50, %60), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s # C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\functional.py:680:0\\n)\\' (type \\'Tensor\\') in the TorchScript graph. The containing node has kind \\'onnx::Reshape\\'.] \\n    (node defined in C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\functional.py(680): stft\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_b_separation_probe.py(53): stft\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_b_separation_probe.py(75): forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1769): _slow_forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1790): _call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1779): _wrapped_call_impl\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(72): forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1769): _slow_forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1790): _call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1779): _wrapped_call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\jit\\\\_trace.py(131): wrapper\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\jit\\\\_trace.py(140): forward\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1790): _call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\modules\\\\module.py(1779): _wrapped_call_impl\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\jit\\\\_trace.py(1439): _get_trace_graph\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(903): _trace_and_get_graph_from_model\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(997): _create_jit_graph\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(1113): _model_to_graph\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(1515): _export\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\_internal\\\\torchscript_exporter\\\\utils.py(552): export\\nC:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\onnx\\\\__init__.py(334): export\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(77): export_splitter_onnx\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(166): main\\nC:\\\\Users\\\\darre\\\\Sound_Bubble_optim_distance\\\\scripts\\\\inbubble_mixer\\\\stage_e_pi_cost.py(234): <module>\\n<frozen runpy>(88): _run_code\\n<frozen runpy>(198): _run_module_as_main\\n)\\n\\n    Inputs:\\n        #0: 50 defined in (%50 : Float(*, *, *, strides=[896, 896, 1], requires_grad=0, device=cpu) = onnx::Pad[mode=\"reflect\"](%22, %49), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s # C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\nn\\\\functional.py:5430:0\\n    )  (type \\'Tensor\\')\\n        #1: 60 defined in (%60 : int[] = prim::ListConstruct(%54, %59), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s\\n    )  (type \\'List[int]\\')\\n    Outputs:\\n        #0: 61 defined in (%61 : Float(*, *, strides=[896, 1], requires_grad=0, device=cpu) = onnx::Reshape[allowzero=0](%50, %60), scope: __main__.export_splitter_onnx.<locals>.SplitOnly::/scripts.inbubble_mixer.stage_b_separation_probe.SoftMaskBubbleSplit::s # C:\\\\Users\\\\darre\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python311\\\\Lib\\\\site-packages\\\\torch\\\\functional.py:680:0\\n    )  (type \\'Tensor\\')')",
+      "overhead_ratio_torch": 0.26227912621233934,
+      "bubble_plus_splitter_est_ms": 301.2904000002891,
+      "sustainable_hops_estimate": 0.2063876460484584,
+      "recommendation": "multi-out exceeds block budget on this host proxy; keep K=0 mixer pass-through or lighter mask-on-b_hat until Pi 5 re-measure",
+      "gate": {
+        "name": "pi5_cost_envelope",
+        "passed": false,
+        "note": "Pass if multi-out mean infer (77.52 ms) fits 2 hops in 16.0 ms block. Host CPU proxy \u2014 re-measure on Pi 5 before deploy."
+      }
+    },
+    "f": {
+      "stage": "F",
+      "identity_max_abs_err": 0.0,
+      "boost_rms_delta": 0.05221319571137428,
+      "cut_rms_delta": 0.05221319571137428,
+      "region_gains": [
+        2.0,
+        1.0
+      ],
+      "region_rms_delta": 0.05221319571137428,
+      "inference_pipeline_flags": [
+        "--inbubble-mixer",
+        "--speaker-gains 1,1",
+        "--region-center-deg",
+        "--stream-angles-deg"
+      ],
+      "gate": {
+        "name": "thin_realtime_mixer_default_passthrough",
+        "passed": true,
+        "note": "Pass if g=1 is exact pass-through and non-unity gains change output. Wired behind --inbubble-mixer."
+      }
+    },
+    "g": {
+      "stage": "G",
+      "run_dir_promote": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+      "dataset_root": "C:\\Users\\darre\\Sound_Bubble\\datasets\\syn_libri_1_5m_rt60",
+      "n_samples": 40,
+      "beta_priors": {
+        "sigma": 0.2,
+        "rho": 8.0,
+        "theta0_grid_deg": [
+          -90.0,
+          -60.0,
+          -30.0,
+          0.0,
+          30.0,
+          60.0,
+          90.0
+        ],
+        "dis_threshold": 1.5,
+        "note": "Frozen Stage G priors for Stage H directional training."
+      },
+      "follow_theta0_rate": 0.75,
+      "outside_weight_zero_rate": 1.0,
+      "mean_steered_vs_hard_bubble_sisdr": 0.06170114244867748,
+      "gate": {
+        "name": "oracle_steered_mixes_follow_theta0",
+        "follow_rate": 0.75,
+        "outside_suppressed": true,
+        "passed": true,
+        "note": "Pass if product-weighted steered mixes audibly follow \u03b80 (speaker nearer look direction wins SI-SDR) and outside weights stay 0."
+      }
+    },
+    "h": {
+      "stage": "H",
+      "run_dir": "runs\\optim_pretrain_sonitude_dist_count_directional_1_5m",
+      "init_ckpt": "runs/optim_pretrain_sonitude_dist_count_1_5m/checkpoints/best.pt",
+      "promote_untouched": "C:\\Users\\darre\\Sound_Bubble_optim_distance\\runs\\optim_pretrain_sonitude_dist_count_1_5m",
+      "trainable_params": 11266,
+      "total_params": 243166,
+      "steps": 20,
+      "mean_loss": 653.5271193729714,
+      "gate": {
+        "name": "steered_head_train_dir_ready",
+        "passed": true,
+        "note": "Pass if directional run has best/last checkpoints and steered_head params train. Full SI-SDR gate vs bubble baseline requires overnight train_pt."
+      }
+    },
+    "i": {
+      "stage": "I",
+      "promote_run": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+      "directional_run": "runs/optim_pretrain_sonitude_dist_count_directional_1_5m",
+      "directional_loaded": true,
+      "softmask_loaded": true,
+      "n_samples": 32,
+      "identity_rate": 1.0,
+      "beta_better_than_blind_rate": 1.0,
+      "mean_s0_sisdr_beta": 4.85818673826788,
+      "mean_s0_sisdr_blind": -5.698716417604117,
+      "mean_s1_sisdr_beta": -8.665348333428275,
+      "mean_s1_sisdr_blind": -11.365476006658385,
+      "api": {
+        "default_listen": "promote b_hat with g_k=1 (or alpha=0)",
+        "region_control": "theta0 -> g_k = gains_from_beta(angles, theta0)",
+        "steered_blend": "y=(1-alpha)*b_hat + alpha*z_hat  (directional run; alpha=0 default)"
+      },
+      "gate": {
+        "name": "beta_gains_lower_leakage_than_blind",
+        "passed": true,
+        "note": "Pass if g=1 still recovers promote b_hat and \u03b2-weighted gains match or beat blind softmask on s0 boost / s1 leakage when \u03b80 known."
+      }
+    },
+    "j": {
+      "stage": "J",
+      "host_device": "cuda",
+      "hop_ms": 8.0,
+      "block_ms": 16.0,
+      "hops_per_io": 2,
+      "chunk": 192,
+      "promote_run": "runs/optim_pretrain_sonitude_dist_count_1_5m",
+      "directional_run": "runs/optim_pretrain_sonitude_dist_count_directional_1_5m",
+      "directional_loaded": true,
+      "promote_bubble_ms": {
+        "mean_ms": 41.950648749116226,
+        "p50_ms": 37.35995000170078,
+        "p95_ms": 61.69377000333043,
+        "n": 80
+      },
+      "directional_steered_aux_ms": {
+        "mean_ms": 28.189663749799365,
+        "p50_ms": 27.208400002564304,
+        "p95_ms": 33.64213000095332,
+        "n": 80
+      },
+      "promote_within_budget": false,
+      "steered_within_budget": false,
+      "pi5": {
+        "pi5_available": false,
+        "pi5_ort_available": false,
+        "pi5_host": null,
+        "attempts": [
+          {
+            "host": "rpi5-soundbubble",
+            "reachable": false,
+            "ort_available": false,
+            "dns_ok": false,
+            "dns_error": "[Errno 11001] getaddrinfo failed"
+          },
+          {
+            "host": "raspberrypi.local",
+            "reachable": false,
+            "ort_available": false,
+            "dns_ok": false,
+            "dns_error": "[Errno 11001] getaddrinfo failed"
+          }
+        ],
+        "note": "Pi 5 / ORT device unavailable on this machine (no Tailscale MagicDNS / SSH reachability). Host torch proxy timing used instead; keep laptop-only directional zoom."
+      },
+      "timing_source": "host_torch_proxy",
+      "ship": {
+        "default_listen": "promote b_hat (g_k=1 / alpha=0)",
+        "steered_enabled_by_default": false,
+        "steered_affordable_on_this_host": false,
+        "mode": "laptop_only_directional_zoom",
+        "recommendation": "Pi 5 ORT unavailable \u2014 keep promote b_hat+g=1 default; steered remains laptop-only directional zoom until on-device re-bench.",
+        "promote_directional_requires_explicit_user_request": true,
+        "note_timing": "Torch full-block timing on this host is a proxy, not Pi 5 ORT. Stage E already showed multi-out wet decode exceeds budget; prefer one steered aux only after on-device re-bench.",
+        "pi5_ort_bench": "skipped_device_unavailable"
+      },
+      "gate": {
+        "name": "cost_gate_default_promote",
+        "passed": true,
+        "steered_ship_default": false,
+        "laptop_only_directional_zoom": true,
+        "note": "Pass if default remains promote b_hat and either steered fits the 16 ms block budget or we document laptop-only directional zoom."
+      }
+    }
+  }
+}
