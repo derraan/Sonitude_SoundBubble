@@ -1,0 +1,15 @@
+{
+  "sigma": 0.2,
+  "rho": 8.0,
+  "theta0_grid_deg": [
+    -90.0,
+    -60.0,
+    -30.0,
+    0.0,
+    30.0,
+    60.0,
+    90.0
+  ],
+  "dis_threshold": 1.5,
+  "note": "Frozen Stage G priors for Stage H directional training."
+}

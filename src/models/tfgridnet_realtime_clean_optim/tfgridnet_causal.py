@@ -259,6 +259,117 @@ class CountDistanceHead(nn.Module):
         next_state = torch.cat([fast_state, slow_state], dim=1)
         return outputs, next_state
 
+
+class SteeredHead(nn.Module):
+    """θ0-conditioned spectral mask head → steered mono via mixture ref STFT.
+
+    External cyclic θ0 embedding (Jing-style sin/cos) FiLM-modulates frame
+    features; mask is applied to the reference-mic STFT and ISTFT'd with the
+    same hop as TFGridNet (training / full-utt path).
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        n_freqs: int,
+        hidden_dim: int = 32,
+        hop_samples: int = 192,
+        n_fft: int = 288,
+    ) -> None:
+        super().__init__()
+        self.in_dim = int(in_dim)
+        self.n_freqs = int(n_freqs)
+        self.hidden_dim = int(hidden_dim)
+        self.hop_samples = int(hop_samples)
+        self.n_fft = int(n_fft)
+
+        self.theta_mlp = nn.Sequential(
+            nn.Linear(2, self.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(self.hidden_dim, self.in_dim * 2),
+        )
+        self.frame_proj = nn.Sequential(
+            nn.Linear(self.in_dim, self.hidden_dim),
+            nn.SiLU(),
+        )
+        # Complex mask (real, imag) per frequency bin.
+        self.mask_proj = nn.Linear(self.hidden_dim, self.n_freqs * 2)
+
+    @staticmethod
+    def cyclic_embed(theta0_rad: torch.Tensor) -> torch.Tensor:
+        # theta0_rad: [B]
+        return torch.stack([torch.sin(theta0_rad), torch.cos(theta0_rad)], dim=-1)
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        theta0_rad: torch.Tensor,
+        ref_stft: torch.Tensor,
+        target_len: int,
+        dec,
+        lookback: int,
+        lookahead: int,
+        chunk_size: int,
+        istft_lookback: int,
+    ) -> torch.Tensor:
+        """
+        features: [B, C, T, F]
+        theta0_rad: [B]
+        ref_stft: [B, nfft+2, T]  (real||imag stacked on freq axis as encoder)
+        returns steered mono [B, 1, T_audio]
+        """
+        # Pool over frequency → frame latents [B, T, C]
+        pooled = features.mean(dim=3).transpose(1, 2)
+
+        te = self.cyclic_embed(theta0_rad.to(dtype=pooled.dtype))  # [B, 2]
+        film = self.theta_mlp(te)  # [B, 2C]
+        gamma, beta = film.chunk(2, dim=-1)
+        pooled_mod = pooled * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+        frame = self.frame_proj(pooled_mod)  # [B, T, H]
+
+        mask_ri = self.mask_proj(frame)  # [B, T, 2F]
+        bsz, n_frames, _ = mask_ri.shape
+        mask_ri = mask_ri.view(bsz, n_frames, 2, self.n_freqs).permute(0, 2, 3, 1)
+        # mask_ri: [B, 2, F, T]; tanh keeps soft
+        mask_ri = torch.tanh(mask_ri)
+
+        # ref_stft: [B, 2F, T] → split real/imag
+        real, imag = torch.split(ref_stft, [self.n_freqs, self.n_freqs], dim=1)
+        mr, mi = mask_ri[:, 0], mask_ri[:, 1]
+        # Complex multiply: (r+ji)*(mr+jmi)
+        out_r = real * mr - imag * mi
+        out_i = real * mi + imag * mr
+        steered_spec = torch.cat([out_r, out_i], dim=1).unsqueeze(1)  # [B, 1, 2F, T]
+
+        # Pad with zeros for istft lookback (full-utt / non-stream training).
+        pad = torch.zeros(
+            bsz,
+            1,
+            steered_spec.shape[2],
+            istft_lookback,
+            device=steered_spec.device,
+            dtype=steered_spec.dtype,
+        )
+        steered_spec = torch.cat([pad, steered_spec], dim=3)
+
+        if lookback == 0:
+            y = dec(steered_spec)[..., :-lookahead]
+        else:
+            # Mirror TFGridNet.causal_decoder for look_back > 0.
+            y_fold = steered_spec.unfold(3, 1, 1).permute(0, 1, 3, 2, 4)
+            y_fold = dec(y_fold)[..., lookback:]
+            y_fold[..., 1:, :lookahead] += y_fold[..., :-1, -lookahead:]
+            y_fold = y_fold[..., :chunk_size]
+            y = y_fold.reshape(y_fold.shape[0], y_fold.shape[1], y_fold.shape[2] * chunk_size)
+
+        y = y[..., istft_lookback * chunk_size :]
+        if y.shape[-1] > target_len:
+            y = y[..., :target_len]
+        elif y.shape[-1] < target_len:
+            y = F.pad(y, (0, target_len - y.shape[-1]))
+        return y
+
+
 class TFGridNet(AbsSeparator):
     """Offline TFGridNet
 
@@ -327,6 +438,7 @@ class TFGridNet(AbsSeparator):
         conv_lstm = True,
         fb_type='stft',
         count_distance_head: Optional[dict] = None,
+        steered_head: Optional[dict] = None,
     ):
         super().__init__()
         self.n_srcs = n_srcs
@@ -349,6 +461,8 @@ class TFGridNet(AbsSeparator):
         self.directional = directional
         self.count_distance_head_enabled = bool(count_distance_head and count_distance_head.get("enabled", True))
         self.count_distance_head_cfg = count_distance_head or {}
+        self.steered_head_enabled = bool(steered_head and steered_head.get("enabled", False))
+        self.steered_head_cfg = steered_head or {}
 
         # ISTFT overlap-add will affect this many chunks in the future
         self.istft_lookback = 1 + (self.istft_pad - 1) // self.istft_pad
@@ -426,6 +540,18 @@ class TFGridNet(AbsSeparator):
             )
         else:
             self.count_distance_head = None
+
+        self.steered_head: Optional[SteeredHead]
+        if self.steered_head_enabled:
+            self.steered_head = SteeredHead(
+                in_dim=emb_dim,
+                n_freqs=n_freqs,
+                hidden_dim=int(self.steered_head_cfg.get("hidden_dim", max(32, emb_dim))),
+                hop_samples=stride,
+                n_fft=n_fft,
+            )
+        else:
+            self.steered_head = None
     
     def init_buffers(self, batch_size, device):
         if self.merge_method == "None": 
@@ -467,7 +593,8 @@ class TFGridNet(AbsSeparator):
     def forward(
             self,
         input: torch.Tensor,
-        input_state
+        input_state,
+        theta0_rad: Optional[torch.Tensor] = None,
     ) -> Tuple[List[torch.Tensor], torch.Tensor, OrderedDict]:
         """Forward.
 
@@ -554,6 +681,32 @@ class TFGridNet(AbsSeparator):
                 )
             speaker_outputs, count_distance_head_buf = self.count_distance_head(batch, count_distance_head_buf)
             input_state["count_distance_head_buf"] = count_distance_head_buf
+
+        steered_output = None
+        if self.steered_head_enabled and self.steered_head is not None:
+            if theta0_rad is None:
+                theta0_rad = torch.zeros(batch.shape[0], device=batch.device, dtype=batch.dtype)
+            elif theta0_rad.dim() == 0:
+                theta0_rad = theta0_rad.expand(batch.shape[0])
+            ref_stft = input_stft[:, 0]  # [B, 2F, T]
+            # Match feature time after conv buffer trim: batch is already trimmed.
+            # ref_stft frames may equal n_frames; align lengths.
+            t_feat = batch.shape[2]
+            if ref_stft.shape[-1] > t_feat:
+                ref_stft = ref_stft[..., -t_feat:]
+            elif ref_stft.shape[-1] < t_feat:
+                ref_stft = F.pad(ref_stft, (t_feat - ref_stft.shape[-1], 0))
+            steered_output = self.steered_head(
+                batch,
+                theta0_rad,
+                ref_stft,
+                target_len=n_samples,
+                dec=self.dec,
+                lookback=self.lookback,
+                lookahead=self.lookahead,
+                chunk_size=self.chunk_size,
+                istft_lookback=self.istft_lookback,
+            )
         
         batch = torch.cat(( deconv_buf, batch), dim=2)
         deconv_buf = batch[:, :,  -(self.t_ksize - 1):, :]
@@ -590,9 +743,17 @@ class TFGridNet(AbsSeparator):
         input_state['istft_buf'] = istft_buf
         input_state['gridnet_bufs'] = gridnet_buf
 
-        if speaker_outputs is None:
+        aux = speaker_outputs
+        if steered_output is not None:
+            if aux is None:
+                aux = {}
+            else:
+                aux = dict(aux)
+            aux["steered_output"] = steered_output
+
+        if aux is None:
             return batch, input_state
-        return batch, input_state, speaker_outputs
+        return batch, input_state, aux
 
     @property
     def num_spk(self):

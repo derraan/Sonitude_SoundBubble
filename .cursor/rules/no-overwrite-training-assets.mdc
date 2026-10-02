@@ -1,0 +1,48 @@
+---
+description: Never overwrite or delete checkpoints, datasets, or active training code without explicit user approval
+alwaysApply: true
+---
+
+# No-overwrite guardrail (models, datasets, training code)
+
+Hard lesson: agent `git checkout` / `Copy-Item -Force` / stash restores have destroyed overnight training progress. Treat the following as **irreplaceable** unless the user explicitly authorizes a write.
+
+## Never do without explicit user approval
+
+1. **Overwrite** `*.pt` / `*.onnx` / `*.ckpt` under any `runs/**/checkpoints/`, `runs/_recovery*/`, or archive paths.
+2. **`git checkout` / `git restore` / `git stash show` / `git show … >`** of checkpoint blobs onto a live path that already has a non-empty file.
+3. **`Copy-Item -Force` / `shutil.copy` / `rm` / `Remove-Item`** on checkpoints, `datasets/**` synthetic sets, or active train/val Python.
+4. **Delete or empty** `runs/**`, `datasets/**`, `src/datasets/**`, `src/hl_modules/**`, `src/train_pt.py`, `src/training/**`, `src/validation/**`, `real_experiments/*.json` (non-`old`).
+5. **Stash pop / stash apply** that would touch the paths above — extract to a **new** recovery folder instead.
+
+## Safe recovery pattern (required)
+
+- Extract stash/git blobs only into a **new** directory, e.g. `runs/_recovery_<reason>/`.
+- Compare sizes + `current_epoch` / mtime **before** any copy into a live run dir.
+- Restore into a live path **only if** the destination is missing or empty, **or** the user named that exact destination and confirmed overwrite.
+- Prefer **copy**, never in-place checkout over live checkpoints.
+- Keep the recovered copy under `_recovery_*` even after a successful live restore.
+
+## Protected inventory (this worktree)
+
+| Asset | Path | Notes |
+|---|---|---|
+| Promoted compose | `runs/optim_pretrain_sonitude_dist_count_1_5m/` | Default init/eval/deploy; **best≈ep23 / last≈ep31** (do not clobber) |
+| Directional finetune | `runs/optim_pretrain_sonitude_dist_count_directional_1_5m/` | Steered-head run; init from promote — never overwrite promote |
+| Overnight finetune (legacy) | `runs/count_distance_head_optim_1_5m_suppress_v1/` | Historical source; do not clobber |
+| Head archive | `runs/archived_stopband_v2_ep46/` | ep46 heads for transplant |
+| Safe stash copies | `runs/_recovery_safe/` | Read-only recovery mirror |
+| Train/val code | `src/train_pt.py`, `src/hl_modules/`, `src/datasets/`, `src/validation/` | Active stack — not `src/old/` |
+| Configs | `real_experiments/*suppress_v1*.json`, `*sonitude_dist_count*` | Keep; do not replace from unrelated runs |
+| Datasets | `datasets/**` (esp. `syn_*`, Libri synth) | Never delete to “clean” the tree |
+
+## Allowed without asking
+
+- Read / inspect checkpoints (`torch.load` map_location cpu).
+- Write **new** run dirs with a **new** name.
+- Edit code the user asked to change.
+- Move superseded runs into `runs/old/` **only when the user asks**, and only after confirming the destination does not erase a newer checkpoint.
+
+## If unsure
+
+Stop. Report what you were about to overwrite and wait for an explicit yes.

@@ -1,0 +1,15 @@
+{
+  "stage": "C",
+  "geometry": "vertical_arc_headphone_xz",
+  "n_samples": 80,
+  "doa_abs_err_mean_deg": 86.43587497363058,
+  "doa_abs_err_median_deg": 82.3318304874833,
+  "lr_sign_accuracy": 1.0,
+  "region30_separable_rate": 0.9,
+  "mean_inside_angle_separation_deg": 97.0380018143542,
+  "gate": {
+    "name": "useful_LR_region_control",
+    "passed": true,
+    "note": "Pass if ear-pair GCC-PHAT gets L/R sign >=65% and >=40% of 2-speaker scenes are separable by a \u00b130\u00b0 angular region. Not a full-azimuth UCA claim."
+  }
+}

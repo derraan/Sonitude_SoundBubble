@@ -136,6 +136,13 @@ def main() -> None:
         results[rt60] = outs
         in_check[rt60] = ins
 
+    # Passband ripple on RT60=0.2: peak−peak inside bubble among active passband points.
+    rt02 = results.get(0.2)
+    if rt02 is not None:
+        interior = [lvl for d, lvl in zip(DISTANCES, rt02) if float(d) < bubble_m and lvl > -60.0]
+        ripple = (max(interior) - min(interior)) if len(interior) >= 2 else float("nan")
+        print(f"\npassband_ripple_0_2_db={ripple:.2f}  (max−min out dBFS for d<{bubble_m}m & out>-60, RT60=0.2s)")
+
     os.makedirs(os.path.dirname(out_png), exist_ok=True)
     with open(out_csv, "w", encoding="utf-8") as f:
         header = "distance_m," + ",".join([f"out_rt60_{rt60}" for rt60 in RT60_LIST]) + ",input_mic0_dbfs\n"

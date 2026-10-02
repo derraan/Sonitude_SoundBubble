@@ -1,0 +1,22 @@
+{
+  "stage": "F",
+  "identity_max_abs_err": 0.0,
+  "boost_rms_delta": 0.05221319571137428,
+  "cut_rms_delta": 0.05221319571137428,
+  "region_gains": [
+    2.0,
+    1.0
+  ],
+  "region_rms_delta": 0.05221319571137428,
+  "inference_pipeline_flags": [
+    "--inbubble-mixer",
+    "--speaker-gains 1,1",
+    "--region-center-deg",
+    "--stream-angles-deg"
+  ],
+  "gate": {
+    "name": "thin_realtime_mixer_default_passthrough",
+    "passed": true,
+    "note": "Pass if g=1 is exact pass-through and non-unity gains change output. Wired behind --inbubble-mixer."
+  }
+}
