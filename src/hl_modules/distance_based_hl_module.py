@@ -78,6 +78,17 @@ class PLModule(object):
         # When steered training freezes backbone, count head is also frozen unless
         # train_count_heads is explicitly true.
         self.steered_train_count_heads = bool(self.steered_head_cfg.get('train_count_heads', False))
+        # θ0 sweep: full 360° at 30° steps (12 directions); look−no-look SI-SDR
+        # delta capped at look_delta_cap_db.
+        from src.datasets.dsenet_beta import DEFAULT_LOOK_DELTA_CAP_DB, DEFAULT_THETA0_GRID_DEG
+        grid = self.steered_head_cfg.get("theta0_grid_deg", list(DEFAULT_THETA0_GRID_DEG))
+        self.steered_theta0_grid_deg = tuple(float(x) % 360.0 for x in grid)
+        self.look_delta_cap_db = float(self.steered_head_cfg.get("look_delta_cap_db", DEFAULT_LOOK_DELTA_CAP_DB))
+        self.look_delta_loss_weight = float(self.steered_head_cfg.get("w_look_delta", 0.5))
+        # Run full θ0 sweep every N train steps (always on val). Prefer N>=4 when
+        # the grid has 12 angles (12 extra forwards per sweep).
+        self.theta0_sweep_every_n = int(self.steered_head_cfg.get("theta0_sweep_every_n", 4))
+        self._steered_train_step = 0
 
         self.freeze_backbone = bool(
             self.count_distance_head_cfg.get('freeze_backbone', False)
@@ -328,6 +339,120 @@ class PLModule(object):
         active = pooled > (peak * ratio)
         active = active & (spk_valid.unsqueeze(-1) > 0.0)
         return active.float().permute(0, 2, 1)
+
+    def _si_sdr_db_torch(self, est: torch.Tensor, ref: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Per-item SI-SDR in dB. est/ref: [B, T] or [B, 1, T]."""
+        from src.datasets.dsenet_beta import si_sdr_db_torch
+        return si_sdr_db_torch(est, ref, eps=eps)
+
+    def _looked_spk_indices(
+        self,
+        theta0_deg: torch.Tensor,
+        spk_angle_deg: torch.Tensor,
+        spk_valid: torch.Tensor,
+    ) -> torch.Tensor:
+        """For each batch item, index of valid speaker nearest to θ0 (or -1)."""
+        bsz = spk_angle_deg.shape[0]
+        out = torch.full((bsz,), -1, device=spk_angle_deg.device, dtype=torch.long)
+        th = theta0_deg.reshape(-1).to(spk_angle_deg.device)
+        if th.numel() == 1:
+            th = th.expand(bsz)
+        for b in range(bsz):
+            valid = spk_valid[b] > 0.5
+            if not valid.any():
+                continue
+            angs = spk_angle_deg[b]
+            d = torch.abs(((angs - th[b] + 180.0) % 360.0) - 180.0)
+            d = torch.where(valid, d, torch.full_like(d, 1e9))
+            out[b] = int(torch.argmin(d).item())
+        return out
+
+    @torch.no_grad()
+    def _theta0_sweep_look_deltas(
+        self,
+        inputs: dict,
+        targets: dict,
+        bubble: torch.Tensor,
+        step: str,
+        batch_size: int,
+    ) -> None:
+        """Forward steered head at each θ0 on the 360°/30° grid; log SI-SDR look/no-look deltas (capped)."""
+        if not self.steered_head_enabled:
+            return
+        if "spk_ref" not in targets or "spk_angle_deg" not in targets:
+            return
+        spk_ref = targets["spk_ref"].float()
+        spk_ang = targets["spk_angle_deg"].float()
+        spk_valid = targets["spk_valid"].float()
+        device = bubble.device
+        cap = float(self.look_delta_cap_db)
+
+        # Aggregate per-grid-angle and overall look delta.
+        deltas_all = []
+        for th_deg in self.steered_theta0_grid_deg:
+            th_norm = float(th_deg) % 360.0
+            th_key = f"{int(round(th_norm)):03d}"
+            th = torch.full((batch_size,), th_norm, device=device, dtype=torch.float32)
+            sweep_in = dict(inputs)
+            sweep_in["theta0_rad"] = th * (np.pi / 180.0)
+            sweep_in["theta0_deg"] = th
+            out = self.model(sweep_in)
+            z = out.get("steered_output")
+            if z is None:
+                continue
+            if z.ndim == 3:
+                z = z[:, 0, :]
+            b = bubble
+            if b.ndim == 3:
+                b = b[:, 0, :]
+            tlen = min(z.shape[-1], b.shape[-1], spk_ref.shape[-1])
+            z = z[..., :tlen]
+            b = b[..., :tlen]
+            looked = self._looked_spk_indices(th, spk_ang, spk_valid)
+            for i in range(batch_size):
+                k = int(looked[i].item())
+                if k < 0:
+                    continue
+                ref_k = spk_ref[i, k, :tlen]
+                if float(ref_k.abs().max()) <= 0:
+                    continue
+                d_look = self._si_sdr_db_torch(z[i : i + 1], ref_k.unsqueeze(0))
+                d_base = self._si_sdr_db_torch(b[i : i + 1], ref_k.unsqueeze(0))
+                delta = float((d_look - d_base).item())
+                capped = min(cap, delta) if np.isfinite(delta) else float("nan")
+                if np.isfinite(capped):
+                    deltas_all.append(capped)
+                    self.log_metric(
+                        f"{step}/look_delta_db_th{th_key}",
+                        capped,
+                        batch_size=1,
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                        sync_dist=True,
+                    )
+                    # Per-speaker SI-SDR under this look
+                    self.log_metric(
+                        f"{step}/sisdr_look_th{th_key}",
+                        float(d_look.item()),
+                        batch_size=1,
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                        sync_dist=True,
+                    )
+
+        if deltas_all:
+            mean_delta = float(np.mean(deltas_all))
+            self.log_metric(
+                f"{step}/look_delta_db_mean",
+                mean_delta,
+                batch_size=batch_size,
+                on_step=(step == "train"),
+                on_epoch=True,
+                prog_bar=True,
+                sync_dist=True,
+            )
     
     def load_state(self, path, map_location=None):
         state = torch.load(path, map_location=map_location)
@@ -532,6 +657,16 @@ class PLModule(object):
             print(f'Val spk distance loss (SmoothL1): {val_spk_distance_loss:.04f}')
             print(f'Val spk activity loss (BCE): {val_spk_activity_loss:.04f}')
             print(f'Val spk distance MAE: {val_spk_distance_mae:.04f} m')
+
+        if self.steered_head_enabled:
+            val_steered_loss = self._try_get_avg_metric_at_epoch('val/steered_loss')
+            val_look_delta = self._try_get_avg_metric_at_epoch('val/look_delta_db')
+            val_look_delta_mean = self._try_get_avg_metric_at_epoch('val/look_delta_db_mean')
+            val_oracle_delta = self._try_get_avg_metric_at_epoch('val/oracle_look_delta_db')
+            print(f'Val steered loss: {val_steered_loss:.04f}')
+            print(f'Val look-delta SI-SDR (capped {self.look_delta_cap_db:.0f} dB): {val_look_delta:.02f} dB')
+            print(f'Val θ0-sweep mean look-delta: {val_look_delta_mean:.02f} dB')
+            print(f'Val oracle look-delta (β-modulated): {val_oracle_delta:.02f} dB')
 
         # Audio enhancement metrics are secondary for frozen-backbone aux-head runs.
         if not (self.freeze_backbone and self.has_aux_heads):
@@ -759,12 +894,68 @@ class PLModule(object):
             if z_gt.ndim == 2:
                 z_gt = z_gt.unsqueeze(1)
             steered_loss = self.loss_fn(est=z_hat, gt=z_gt).mean()
+
+            # Look vs no-look SI-SDR delta (no-look = hard bubble est).
+            # Maximize delta up to look_delta_cap_db (default 6 dB).
+            look_delta_loss = est.new_tensor(0.0)
+            look_delta_mean = est.new_tensor(0.0)
+            if "spk_ref" in targets and "spk_angle_deg" in targets and "spk_valid" in targets:
+                spk_ref = targets["spk_ref"].float().to(z_hat.device)
+                spk_ang = targets["spk_angle_deg"].float().to(z_hat.device)
+                spk_valid = targets["spk_valid"].float().to(z_hat.device)
+                if "theta0_deg" in inputs:
+                    th_deg = inputs["theta0_deg"].float().to(z_hat.device)
+                else:
+                    th_deg = inputs.get("theta0_rad", est.new_zeros(batch_size)) * (180.0 / np.pi)
+                    th_deg = th_deg.float().reshape(-1)
+                if "looked_spk_idx" in targets:
+                    looked = targets["looked_spk_idx"].long().to(z_hat.device).reshape(-1)
+                else:
+                    looked = self._looked_spk_indices(th_deg, spk_ang, spk_valid)
+
+                z_mono = z_hat[:, 0, :] if z_hat.ndim == 3 else z_hat
+                b_mono = est[:, 0, :t] if est.ndim == 3 else est[..., :t]
+                cap = float(self.look_delta_cap_db)
+                deltas = []
+                for i in range(batch_size):
+                    k = int(looked[i].item()) if looked.numel() > i else -1
+                    if k < 0 or k >= spk_ref.shape[1]:
+                        continue
+                    if float(spk_valid[i, k].item()) <= 0.5:
+                        continue
+                    ref_k = spk_ref[i, k, :t]
+                    if float(ref_k.abs().max()) <= 0:
+                        continue
+                    sisdr_look = self._si_sdr_db_torch(z_mono[i : i + 1], ref_k.unsqueeze(0))
+                    sisdr_noolook = self._si_sdr_db_torch(b_mono[i : i + 1].detach(), ref_k.unsqueeze(0))
+                    raw_delta = sisdr_look - sisdr_noolook
+                    # Loss: push delta up to cap (0 when delta >= cap).
+                    deltas.append(torch.relu(raw_delta.new_tensor(cap) - raw_delta))
+                    look_delta_mean = look_delta_mean + torch.clamp(raw_delta, max=cap).detach()
+                if deltas:
+                    look_delta_loss = torch.stack(deltas).mean()
+                    look_delta_mean = look_delta_mean / len(deltas)
+
             if self.freeze_backbone and not self.steered_train_count_heads:
-                loss = self.steered_loss_weight * steered_loss
+                loss = (
+                    self.steered_loss_weight * steered_loss
+                    + self.look_delta_loss_weight * look_delta_loss
+                )
             elif self.freeze_backbone:
-                loss = loss + self.steered_loss_weight * steered_loss
+                loss = (
+                    loss
+                    + self.steered_loss_weight * steered_loss
+                    + self.look_delta_loss_weight * look_delta_loss
+                )
             else:
-                loss = loss + self.steered_loss_weight * steered_loss
+                loss = (
+                    loss
+                    + self.steered_loss_weight * steered_loss
+                    + self.look_delta_loss_weight * look_delta_loss
+                )
+        else:
+            look_delta_loss = est.new_tensor(0.0)
+            look_delta_mean = est.new_tensor(0.0)
 
         # Passband ripple aux (RT60≈0.2 peak−peak dBFS inside bubble). Lower is better.
         # Only applied when weight > 0 and backbone is trainable (affects main output).
@@ -790,6 +981,45 @@ class PLModule(object):
                 self.log_metric(f'{step}/spk_activity_loss', spk_activity_loss.item(), batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
             if self.steered_head_enabled:
                 self.log_metric(f'{step}/steered_loss', steered_loss.item(), batch_size=batch_size, on_step=(step == 'train'), on_epoch=True, prog_bar=True, sync_dist=True)
+                if look_delta_loss.item() != 0.0 or look_delta_mean.item() != 0.0:
+                    self.log_metric(
+                        f'{step}/look_delta_loss',
+                        look_delta_loss.item(),
+                        batch_size=batch_size,
+                        on_step=(step == 'train'),
+                        on_epoch=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
+                    self.log_metric(
+                        f'{step}/look_delta_db',
+                        look_delta_mean.item(),
+                        batch_size=batch_size,
+                        on_step=(step == 'train'),
+                        on_epoch=True,
+                        prog_bar=True,
+                        sync_dist=True,
+                    )
+                if "oracle_look_delta_db" in targets:
+                    od = targets["oracle_look_delta_db"].float().mean().item()
+                    self.log_metric(
+                        f'{step}/oracle_look_delta_db',
+                        od,
+                        batch_size=batch_size,
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                        sync_dist=True,
+                    )
+                # θ0 sweep (30° grid): look vs bubble SI-SDR delta per direction.
+                do_sweep = (step == "val") or (
+                    step == "train"
+                    and (self._steered_train_step % max(1, self.theta0_sweep_every_n) == 0)
+                )
+                if step == "train":
+                    self._steered_train_step += 1
+                if do_sweep:
+                    self._theta0_sweep_look_deltas(inputs, targets, est_detached, step, batch_size)
             if self.passband_ripple_w > 0.0 and step == "train" and passband_ripple_loss.item() != 0.0:
                 self.log_metric(
                     f'{step}/passband_ripple_db',

@@ -22,6 +22,20 @@ y = (1 - alpha) * b_hat + alpha * z_hat
 
 β gains (Stage I): `g_k = gains_from_beta(angles, theta0)` with frozen σ=0.2, ρ=8.0.
 
+## Directional θ₀ (360° / 30°)
+
+Train/val steered targets and the θ₀ evaluation sweep use a **full-circle** grid:
+
+```
+[0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
+```
+
+Vertical-arc **data** may still concentrate speakers in a subset of angles; the look
+grid is not limited to ±90°. On train, the full 12-angle sweep runs every
+`theta0_sweep_every_n` steps (default 4) to limit cost; val sweeps every batch.
+
+See `docs/directional_train_val_audit.md` for loss/metric semantics.
+
 ## Run order
 
 ```powershell
