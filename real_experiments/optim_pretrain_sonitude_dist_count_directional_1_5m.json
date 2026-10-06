@@ -50,7 +50,11 @@
             "enabled": true,
             "freeze_backbone": true,
             "train_count_heads": false,
-            "w_steered": 1.0
+            "w_steered": 1.0,
+            "w_look_delta": 0.5,
+            "look_delta_cap_db": 6.0,
+            "theta0_grid_deg": [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330],
+            "theta0_sweep_every_n": 4
         },
         "distance_sweep_val": {
             "enabled": false
@@ -95,7 +99,10 @@
             "enabled": true,
             "sigma": 0.2,
             "rho": 8.0,
-            "theta0_grid_deg": [-90, -60, -30, 0, 30, 60, 90]
+            "theta0_grid_deg": [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330],
+            "beta_modulate": true,
+            "look_delta_cap_db": 6.0,
+            "look_toward_speaker": true
         }
     },
     "val_dataset": "src.datasets.general_multisrc_dataset_with_perturbations.Dataset",
@@ -118,8 +125,10 @@
             "enabled": true,
             "sigma": 0.2,
             "rho": 8.0,
-            "theta0_grid_deg": [-90, -60, -30, 0, 30, 60, 90],
-            "theta0_fixed_deg": 0.0
+            "theta0_grid_deg": [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330],
+            "beta_modulate": true,
+            "look_delta_cap_db": 6.0,
+            "look_toward_speaker": true
         }
     },
     "epochs": 20,

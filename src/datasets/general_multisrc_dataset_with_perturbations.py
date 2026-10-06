@@ -10,10 +10,14 @@ import torch
 
 import helpers.utils as utils
 from src.datasets.dsenet_beta import (
+    DEFAULT_LOOK_DELTA_CAP_DB,
     DEFAULT_RHO,
     DEFAULT_SIGMA,
     DEFAULT_THETA0_GRID_DEG,
+    modulate_beta_for_look_delta,
+    nearest_theta0_deg,
     product_weights,
+    sample_look_theta0_deg,
     sample_theta0_deg,
 )
 from src.datasets.perturbations.audio_perturbations import AudioPerturbations
@@ -80,11 +84,18 @@ class Dataset(torch.utils.data.Dataset):
         self.beta_sigma = float(steered_cfg.get("sigma", DEFAULT_SIGMA))
         self.beta_rho = float(steered_cfg.get("rho", DEFAULT_RHO))
         grid = steered_cfg.get("theta0_grid_deg", list(DEFAULT_THETA0_GRID_DEG))
-        self.theta0_grid_deg = tuple(float(x) for x in grid)
-        # Fixed look for val (reproducible); train samples from grid.
+        # Normalize to [0, 360) so arc-style negatives (e.g. -90) and full-circle
+        # configs share one key space.
+        self.theta0_grid_deg = tuple(float(x) % 360.0 for x in grid)
+        # Fixed look for val (reproducible); train samples look toward a speaker.
         self.theta0_fixed_deg = steered_cfg.get("theta0_fixed_deg", None)
         if self.theta0_fixed_deg is not None:
             self.theta0_fixed_deg = float(self.theta0_fixed_deg)
+        # Modulate σ so oracle look−no-look SI-SDR approaches look_delta_cap_db (default 6).
+        self.beta_modulate = bool(steered_cfg.get("beta_modulate", True))
+        self.look_delta_cap_db = float(steered_cfg.get("look_delta_cap_db", DEFAULT_LOOK_DELTA_CAP_DB))
+        # Prefer θ0 nearest a random in-bubble speaker (look) during train.
+        self.look_toward_speaker = bool(steered_cfg.get("look_toward_speaker", True))
 
         for curr_dir in self.dirs:
             if os.path.exists(Path(curr_dir) / "metadata.json"):
@@ -140,7 +151,12 @@ class Dataset(torch.utils.data.Dataset):
                 inside_speakers.append(
                     {
                         "distance_m": float(d),
-                        "angle_deg": float(metadata[voice].get("angle", 0.0)),
+                        "angle_deg": float(
+                            metadata[voice].get(
+                                "angle",
+                                metadata[voice].get("angle_deg", 0.0),
+                            )
+                        ),
                         "voice": voice,
                         "ref_audio": ref_audio,
                     }
@@ -184,26 +200,70 @@ class Dataset(torch.utils.data.Dataset):
         # DSENet product target over *all* inside speakers (not just K=2 slots).
         # Hard bubble GT (target_voice_inside) stays unchanged for b_hat.
         if self.steered_enabled:
+            looked_spk_idx = -1
+            if inside_speakers:
+                angs_all = [float(s.get("angle_deg", 0.0)) for s in inside_speakers]
+            else:
+                angs_all = []
+
             if self.theta0_fixed_deg is not None:
                 theta0_deg = float(self.theta0_fixed_deg)
+                if angs_all:
+                    # Looked speaker = nearest angle to fixed θ0
+                    d = [abs(((a - theta0_deg + 180) % 360) - 180) for a in angs_all]
+                    looked_spk_idx = int(np.argmin(d))
+            elif self.split == "train" and self.look_toward_speaker and angs_all:
+                theta0_deg, looked_spk_idx = sample_look_theta0_deg(
+                    angs_all, grid_deg=self.theta0_grid_deg
+                )
             elif self.split == "train":
                 theta0_deg = sample_theta0_deg(grid_deg=self.theta0_grid_deg)
+                if angs_all:
+                    d = [abs(((a - theta0_deg + 180) % 360) - 180) for a in angs_all]
+                    looked_spk_idx = int(np.argmin(d))
             else:
-                theta0_deg = 0.0
+                # Val: deterministic look toward closest in-bubble speaker (slot 0).
+                if angs_all:
+                    looked_spk_idx = 0
+                    theta0_deg = nearest_theta0_deg(angs_all[0], self.theta0_grid_deg)
+                else:
+                    theta0_deg = 0.0
+
+            oracle_delta = float("nan")
+            sigma_used = self.beta_sigma
             if inside_speakers:
                 dists = [float(s["distance_m"]) for s in inside_speakers]
                 angs = [float(s.get("angle_deg", 0.0)) for s in inside_speakers]
-                w = product_weights(
-                    dists,
-                    angs,
-                    theta0_deg=theta0_deg,
-                    dis_threshold=self.dis_threshold,
-                    sigma=self.beta_sigma,
-                    rho=self.beta_rho,
-                )
-                stacked = torch.stack([s["ref_audio"] for s in inside_speakers], dim=0)
-                target_steered = (stacked * torch.from_numpy(w).to(stacked.dtype).unsqueeze(-1)).sum(dim=0)
-                target_steered = target_steered.unsqueeze(0).expand(len(self.reference_mics), -1)
+                stems_np = [s["ref_audio"].detach().cpu().numpy() for s in inside_speakers]
+                if self.beta_modulate and looked_spk_idx >= 0:
+                    mod = modulate_beta_for_look_delta(
+                        stems_np,
+                        dists,
+                        angs,
+                        theta0_deg=theta0_deg,
+                        looked_spk_idx=looked_spk_idx,
+                        dis_threshold=self.dis_threshold,
+                        sigma=self.beta_sigma,
+                        rho=self.beta_rho,
+                        target_delta_db=self.look_delta_cap_db,
+                    )
+                    sigma_used = float(mod["sigma"])
+                    oracle_delta = float(mod["capped_delta_db"])
+                    w = np.asarray(mod["weights"], dtype=np.float32)
+                    target_steered = torch.from_numpy(mod["z"]).to(dtype=target_voice_inside.dtype)
+                    target_steered = target_steered.unsqueeze(0).expand(len(self.reference_mics), -1)
+                else:
+                    w = product_weights(
+                        dists,
+                        angs,
+                        theta0_deg=theta0_deg,
+                        dis_threshold=self.dis_threshold,
+                        sigma=self.beta_sigma,
+                        rho=self.beta_rho,
+                    )
+                    stacked = torch.stack([s["ref_audio"] for s in inside_speakers], dim=0)
+                    target_steered = (stacked * torch.from_numpy(w).to(stacked.dtype).unsqueeze(-1)).sum(dim=0)
+                    target_steered = target_steered.unsqueeze(0).expand(len(self.reference_mics), -1)
                 beta_weights = torch.zeros(max_slots, dtype=torch.float32)
                 for slot_idx in range(min(max_slots, len(w))):
                     beta_weights[slot_idx] = float(w[slot_idx])
@@ -216,6 +276,9 @@ class Dataset(torch.utils.data.Dataset):
             beta_weights = None
             theta0_rad = None
             theta0_deg = 0.0
+            looked_spk_idx = -1
+            oracle_delta = float("nan")
+            sigma_used = self.beta_sigma
 
         if self.split == "train":
             if target_steered is not None:
@@ -263,6 +326,12 @@ class Dataset(torch.utils.data.Dataset):
         if target_steered is not None:
             targets["target_steered"] = target_steered.float()
             targets["beta_weights"] = beta_weights
-            targets["beta_sigma"] = torch.tensor(self.beta_sigma, dtype=torch.float32)
+            targets["beta_sigma"] = torch.tensor(sigma_used, dtype=torch.float32)
             targets["beta_rho"] = torch.tensor(self.beta_rho, dtype=torch.float32)
+            targets["looked_spk_idx"] = torch.tensor(looked_spk_idx, dtype=torch.long)
+            targets["oracle_look_delta_db"] = torch.tensor(
+                oracle_delta if np.isfinite(oracle_delta) else 0.0,
+                dtype=torch.float32,
+            )
+            targets["look_delta_cap_db"] = torch.tensor(self.look_delta_cap_db, dtype=torch.float32)
         return inputs, targets
