@@ -25,8 +25,6 @@ class OnnxRunResult:
     count_confidence: float | None = None
     count_status: str = "unavailable"
     speaker_distances: tuple[dict[str, object], ...] | None = None
-    # Optional in-bubble speaker streams for controllable mixer (e.g. s0/s1).
-    speaker_streams: tuple[np.ndarray, ...] | None = None
 
 
 class ONNXStreamer:
@@ -57,13 +55,19 @@ class ONNXStreamer:
         if missing:
             raise RuntimeError(f"Expected ONNX state outputs not found: {missing}")
         self._state_output_indices = [self._output_name_to_index[name] for name in self.state_output_names]
+        # Legacy names: distance_m / distance_valid / count_probs
+        # CountDistanceHead export names: spk_distance_m / spk_active / speaker_count_logits
         self._distance_m_index = self._output_name_to_index.get("distance_m")
+        if self._distance_m_index is None:
+            self._distance_m_index = self._output_name_to_index.get("spk_distance_m")
         self._distance_valid_index = self._output_name_to_index.get("distance_valid")
+        if self._distance_valid_index is None:
+            self._distance_valid_index = self._output_name_to_index.get("spk_active")
         self.has_distance_outputs = self._distance_m_index is not None and self._distance_valid_index is not None
         self._count_probs_index = self._output_name_to_index.get("count_probs")
+        if self._count_probs_index is None:
+            self._count_probs_index = self._output_name_to_index.get("speaker_count_logits")
         self.has_count_outputs = self._count_probs_index is not None
-        self._stream_output_names = [n for n in ("s0", "s1", "speaker_0", "speaker_1") if n in self._output_name_to_index]
-        self.has_speaker_streams = len(self._stream_output_names) > 0
         self.distance_valid_threshold = 0.5
         self.distance_trained = False
         self.count_min_confidence = 0.6
@@ -86,8 +90,12 @@ class ONNXStreamer:
         for v in self.state_arrays.values():
             v.fill(0.0)
 
-    def reset_state_and_warm(self) -> None:
+    def warmup(self, frame_shape: tuple[int, int, int], runs: int = 20) -> float:
+        """Run silent frames through the session, restore zero state, return median infer ms."""
+        mixture = np.zeros(frame_shape, dtype=np.float32)
+        times = [self.run(mixture).infer_ms for _ in range(max(1, int(runs)))]
         self.reset_state()
+        return float(np.median(times))
 
     def set_radius(self, radius: float) -> None:
         if not self.accepts_dis_embed:
@@ -139,7 +147,7 @@ class ONNXStreamer:
         distance_m = None
         distance_valid = None
         distance_slots: list[tuple[float, float]] = []
-        if self.has_distance_outputs and self.distance_trained:
+        if self.has_distance_outputs:
             distance_arr = outputs[self._distance_m_index]
             valid_arr = outputs[self._distance_valid_index]
             if distance_arr.ndim == 3:
@@ -166,19 +174,24 @@ class ONNXStreamer:
             if not has_valid:
                 distance_valid = float(distance_slots[0][1]) if len(distance_slots) > 0 else None
                 distance_status = "inactive"
+            if not self.distance_trained and distance_status != "unavailable":
+                distance_status = "untrained"
 
         count_status = "unavailable"
         speaker_count = None
         count_confidence = None
-        if self.has_count_outputs and self.count_trained:
+        if self.has_count_outputs:
             count_arr = outputs[self._count_probs_index]
             count_vec = count_arr[0, -1, :] if count_arr.ndim == 3 else count_arr.reshape(-1)[-3:]
             pred_idx = int(np.argmax(count_vec))
             pred_conf = float(count_vec[pred_idx])
             count_confidence = pred_conf
-            if pred_conf >= self.count_min_confidence:
+            if not self.count_trained:
+                count_status = "untrained"
+                speaker_count = ("0", "1", "2+")[min(pred_idx, 2)]
+            elif pred_conf >= self.count_min_confidence:
                 count_status = "valid"
-                speaker_count = ("0", "1", "2+")[pred_idx]
+                speaker_count = ("0", "1", "2+")[min(pred_idx, 2)]
             else:
                 count_status = "low_confidence"
 
@@ -211,21 +224,6 @@ class ONNXStreamer:
                     }
                 )
             speaker_distances = tuple(rows)
-
-        speaker_streams = None
-        if self.has_speaker_streams:
-            streams: list[np.ndarray] = []
-            for name in self._stream_output_names:
-                arr = outputs[self._output_name_to_index[name]]
-                # Expect [B, T] or [B, 1, T]
-                if arr.ndim == 3:
-                    streams.append(arr[0, 0].astype(np.float32, copy=False))
-                elif arr.ndim == 2:
-                    streams.append(arr[0].astype(np.float32, copy=False))
-                else:
-                    streams.append(arr.reshape(-1).astype(np.float32, copy=False))
-            speaker_streams = tuple(streams)
-
         return OnnxRunResult(
             output=outputs[self._output_index],
             infer_ms=infer_ms,
@@ -236,6 +234,5 @@ class ONNXStreamer:
             count_confidence=count_confidence,
             count_status=count_status,
             speaker_distances=speaker_distances,
-            speaker_streams=speaker_streams,
         )
 
