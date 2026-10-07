@@ -246,7 +246,7 @@ Do **not** clear output already written for this cycle before handling fill. The
 
 Worker-local reset (see `inference_pipeline.py`):
 
-- `in_src.reset()`, `out_src.reset()`, `onnx_streamer.reset_state_and_warm()`
+- `in_src.reset()`, `out_src.reset()`, `onnx_streamer.reset_state()`
 - `current_frame.fill(0.0)`, `last_output_chunk[0].fill(0.0)`
 - `model_ring.clear()` when supported
 - If `clear_io_rings=True` (model ring drop path): `output_ring.clear()`, `dry_ref.clear()`
@@ -357,7 +357,7 @@ Longer-term ways to regain headroom: **larger effective hop** (e.g. more samples
 | [`realtime/dry_reference.py`](realtime/dry_reference.py) | Dry timeline + `read_into_output`. |
 | [`realtime/contracts.py`](realtime/contracts.py) | `RealtimeContract` validation for capture/output ahead bounds. |
 | [`realtime/audio_io.py`](realtime/audio_io.py) | Stream construction and preflight. |
-| [`pipeline/onnx_streamer.py`](pipeline/onnx_streamer.py) | ONNX session and `reset_state_and_warm`. |
+| [`pipeline/onnx_streamer.py`](pipeline/onnx_streamer.py) | ONNX session, `reset_state`, and startup `warmup` (seeds the inference-time estimate). |
 
 ---
 

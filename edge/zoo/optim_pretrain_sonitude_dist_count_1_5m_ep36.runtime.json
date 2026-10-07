@@ -1,0 +1,37 @@
+{
+  "model_sr": 24000,
+  "model_num_ch": 6,
+  "model_chunk": 192,
+  "model_pad": 96,
+  "frame_len": 288,
+  "expected_input_channels": 8,
+  "expected_channel_map": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "notes": "Auto-generated from experiment config used during ONNX export.",
+  "model_class": "src.models.tfgridnet_realtime_clean_optim.net.Net",
+  "dis_threshold": 1.5,
+  "source_config": "C:\\Users\\darre\\Sound_Bubble-worktrees\\realtime-pipeline-audit-2026-10-07\\runs\\_recovery_optim_pretrain_sonitude_dist_count_1_5m_ep35\\config.json",
+  "source_run_dir": "C:\\Users\\darre\\Sound_Bubble-worktrees\\realtime-pipeline-audit-2026-10-07\\runs\\_recovery_optim_pretrain_sonitude_dist_count_1_5m_ep35",
+  "source_checkpoint": "C:\\Users\\darre\\Sound_Bubble-worktrees\\realtime-pipeline-audit-2026-10-07\\runs\\_recovery_optim_pretrain_sonitude_dist_count_1_5m_ep35\\checkpoints\\best.pt",
+  "trained_epochs": 36,
+  "distance_head_enabled": true,
+  "distance_head_trained": true,
+  "distance_valid_threshold": 0.5,
+  "distance_update_interval_s": 0.008,
+  "distance_history_tau_s": 1.0,
+  "count_head_enabled": true,
+  "count_head_trained": true,
+  "count_classes": [
+    "0",
+    "1",
+    "2+"
+  ],
+  "count_min_confidence": 0.6,
+  "count_history_tau_s": 0.5
+}
