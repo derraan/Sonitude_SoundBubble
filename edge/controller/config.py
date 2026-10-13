@@ -61,7 +61,7 @@ class PipelineConfig:
 
     # Queue / overload policy
     queue_policy: str = "adaptive"
-    overload_policy: str = "dry_fill"
+    overload_policy: str = "silence_fill"
     max_capture_age_ms: float = 24.0
     recover_steps_per_block: int = 2
     recover_ahead_multiplier: float = 1.5

@@ -276,10 +276,10 @@ When fewer than `hops_per_io` wet hops complete in an iteration (budget, ring un
 ### `--overload-policy {dry_fill,silence_fill,strict}`
 
 - **What**: How to fill missing wet time for the current block.
-- **Default**: `dry_fill`.
+- **Default**: `silence_fill` (matches stock `lowlat` launcher; avoids dry mic bleed under overload).
 - **Behavior**:
-  - `dry_fill`: append dry monitor-channel audio at output rate (from `DryReferenceRing.read_into_output`); zeros pad if the dry ring underruns.
   - `silence_fill`: append zeros for the same duration.
+  - `dry_fill`: append dry monitor-channel audio at output rate (from `DryReferenceRing.read_into_output`); zeros pad if the dry ring underruns.
   - `strict`: no fill; shorter output blocks (more underrun risk under overload).
 
 After dry/silence fill, the worker schedules a **deferred** timeline reset (model + resamplers + model ring) **without** clearing audio already queued on the output ring, so playback is not wiped immediately after enqueue. See “Timeline resets” in [`EDGE_RUNTIME.md`](EDGE_RUNTIME.md).

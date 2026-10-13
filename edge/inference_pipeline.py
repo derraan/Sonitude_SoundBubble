@@ -138,12 +138,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overload-policy",
         type=str,
-        default="dry_fill",
+        default="silence_fill",
         choices=["dry_fill", "silence_fill", "strict"],
         help=(
             "When full wet inference for the current block is not affordable: "
+            "'silence_fill' (default) fills with silence (no dry mic bleed), "
             "'dry_fill' fills missing output time with dry audio, "
-            "'silence_fill' fills with silence, "
             "'strict' writes no synthetic fill. Model state is kept; the backlog is caught up later."
         ),
     )

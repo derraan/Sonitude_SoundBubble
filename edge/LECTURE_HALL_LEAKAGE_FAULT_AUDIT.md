@@ -1,11 +1,11 @@
 # Lecture hall leakage — focused fault audit
 
 **Audit date:** 13 October 2026  
-**Last status update:** 13 October 2026 (A3/B8/B7 fixed; B4 software OK; B5 open + owner canon; Pico firmware vendored under `firmware/`)  
+**Last status update:** 14 October 2026 (A2/A3/B8/B7 fixed; B4 software OK; B5 open + owner canon; Pico firmware vendored under `firmware/`)  
 **Scope:** Faint or audible far-field speech (e.g. lecture / PA) while the Sound Bubble pipeline is running on the Pi headset rig.  
 **Symptom framing:** “Feeble” voice may mean failed suppression, bypassed audio, or physical leakage past the earcups—not necessarily a single root cause.
 
-**Worktree for realtime fixes:** `Sound_Bubble-worktrees/realtime-pipeline-audit-2026-10-07` (branch `feat/realtime-phase0-pr`). Sync to the Pi with `run_pi_live_pipeline.ps1 -SyncCode` before expecting these fixes live.
+**Worktree for realtime fixes:** `Sound_Bubble-worktrees/fixes` (branch `feat/realtime-fault-fixes`, PR #8). Sync to the Pi with `run_pi_live_pipeline.ps1 -SyncCode` before expecting these fixes live.
 
 **Related owner-only / agent-readonly docs:**
 - Mic index canon (fill §4 to close B5): [`edge/MIC_INDEX_CANON.md`](MIC_INDEX_CANON.md)
@@ -17,20 +17,19 @@
 
 | Status | IDs | Notes |
 |--------|-----|-------|
-| **Fixed in code** | A3, B8, B7 | In realtime worktree; sync to Pi; confirm `[model]`, silence −100, `input_sr=48000`. |
+| **Fixed in code** | A2, A3, B8, B7 | In `fixes` worktree / PR #8; sync to Pi; confirm `[model]`, silence −100, `input_sr=48000`, overload `silence_fill`. |
 | **Owner action (B5)** | B5 | Indices differ train vs Pico; leave OPEN until you fill [`MIC_INDEX_CANON.md`](MIC_INDEX_CANON.md) §4 from tap probe. |
 | **Tooling ready; needs Pi** | B5, B6 | `edge/tools/channel_probe.py` + `edge/rpi5/run_channel_probe.ps1`. |
 | **Open — do next** | A1, B5, B6, B4, B9 | Leakage test, channel probe, measure layout, firmware gain. |
 | **Open — model / data** | C11 (partial), C12, C13, C10 | After A1 and hardware path are clean. |
-| **Low / conditional** | A2 | Stock `lowlat` launcher already safe. |
-| **Repo note** | — | Pico sources copied into `firmware/mic-array-pico2w-usb6ch/` (not yet committed/PR’d as of last update). |
+| **Repo note** | — | Pico firmware PR: [#9](https://github.com/derraan/Sonitude_SoundBubble/pull/9). |
 
 ### Verification / remediation summary
 
 | Item | Result |
 |------|--------|
 | A1 earcup leakage | Not testable from code; **still open — leading remaining suspect** (sim far-field ~70 dB suppressed). |
-| A2 dry audio | **Partly wrong** — stock launcher uses `silence_fill` + `--mix-dry 0`. Still valid for CLI/controller / non-`lowlat`. |
+| A2 dry audio | **Fixed.** CLI + controller defaults now match `lowlat`: `silence_fill` + `--mix-dry 0`. |
 | A3 wrong model | **Fixed.** Zoo resolver skips `trained_epochs==0`, prefers count-head + highest epochs → ep36. Untrained contracts refused unless `--allow-untrained`. Launcher pairs `-Model` with `--contract-path`. |
 | B5 channel order | **OPEN.** Train ≠ Pico index meaning; Pi default identity unproven. Canon (owner-only edits): [`edge/MIC_INDEX_CANON.md`](MIC_INDEX_CANON.md) — fill §4 after tap probe to close B5. |
 | B6 channel sync | Structurally one PIO / shared clock — **unlikely**. Clap probe ready; residual risk = USB starvation recovery. |
@@ -60,14 +59,14 @@ Closed items kept for history but deprioritized. Re-rank when continuing after A
 | 7 | C12 | Simulation-only | **Open** | Real headset finetune (paper path). |
 | 8 | C13 | Echo softens boundary | **Open** | Hurts near speech more than far leakage. |
 | 9 | C10 | Room scale OOD | **Open** | Large-hall sim / real data. |
-| 10 | A2 | Dry fill / mix-dry | **Conditional** | Only if not on stock `lowlat` launcher. |
+| — | A2 | Dry fill / mix-dry | **Fixed** | CLI/controller/launcher defaults: `silence_fill` + `mix_dry=0`. |
 | — | A3 | Wrong model (fixture) | **Fixed** | Zoo + untrained guard + contract path. |
 | — | B8 | Mute below −50 dBFS | **Fixed** | Defaults / launcher now −100 dBFS. |
 | — | B7 | Sample rate mismatch | **Fixed (Pi)** | Default capture 48 kHz + stream rate assert. |
 
 **Next priority list (open only):**
 
-**A1 → B5 → B6 → B4 → B9 → C11 → C12 → C13 → C10 → (A2 if non-default run)**
+**A1 → B5 → B6 → B4 → B9 → C11 → C12 → C13 → C10**
 
 ---
 
@@ -80,12 +79,17 @@ Top remaining suspect for a “feeble” voice. The paper’s ~49 dB suppression
 - **Check:** Headset on, ANC on, pipeline stopped (or output muted). Same faint voice ⇒ leakage.
 - **Fix:** Closed-back seal + ANC on. Software cannot fix earcup leakage.
 
-### A2 — Raw microphone audio being played — CONDITIONAL
+### A2 — Raw microphone audio being played — FIXED (14 Oct 2026)
 
-CLI/controller still default to **`dry_fill`**. Stock PR #7 launcher (`-Preset lowlat`) already uses `silence_fill` and `--mix-dry 0`.
+Previously only the stock `lowlat` launcher forced `silence_fill` + `--mix-dry 0`; CLI and controller still defaulted to **`dry_fill`**, so non-`lowlat` / controller runs could play dry mic under overload.
 
-- **Check:** Log `filled_hops`, `timeline_resets`, `--mix-dry`, overload policy.
-- **Fix:** `--overload-policy silence_fill` and `--mix-dry 0` (already true for `lowlat`).
+**Remediation (`fixes` / PR #8):**
+- `inference_pipeline.py` `--overload-policy` default → `silence_fill`
+- `controller/config.py` `PipelineConfig.overload_policy` → `silence_fill`
+- `--mix-dry` already defaulted to `0.0` (unchanged)
+- Docs (`INFERENCE_PIPELINE_ARGS.md`, `EDGE_RUNTIME.md`) updated; regression test locks the defaults
+
+Opt-in: pass `--overload-policy dry_fill` if continuous dry fill is still desired for a demo.
 
 ### A3 — Wrong model loaded — FIXED (13 Oct 2026)
 

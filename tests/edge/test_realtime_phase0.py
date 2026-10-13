@@ -120,6 +120,24 @@ def test_controller_argv_passes_queue_and_overload_policy():
     assert "--zoo-dir" in argv and "--model" not in argv
 
 
+def test_a2_defaults_match_lowlat_silence_fill_and_mix_dry_zero(monkeypatch):
+    """CLI + controller defaults must match stock lowlat (no dry mic bleed)."""
+    from edge.inference_pipeline import parse_args
+
+    cfg = PipelineConfig()
+    assert cfg.overload_policy == "silence_fill"
+    assert cfg.mix_dry == 0.0
+    argv = build_pipeline_argv(cfg)
+    flags = dict(zip(argv[1::2], argv[2::2]))
+    assert flags["--overload-policy"] == "silence_fill"
+    assert float(flags["--mix-dry"]) == 0.0
+
+    monkeypatch.setattr(sys, "argv", ["inference_pipeline.py"])
+    ns = parse_args()
+    assert ns.overload_policy == "silence_fill"
+    assert ns.mix_dry == 0.0
+
+
 def test_pipeline_imports_as_module_without_torch():
     code = "import sys, edge.inference_pipeline; sys.exit(1 if 'torch' in sys.modules else 0)"
     res = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True)
