@@ -25,7 +25,7 @@ class PipelineConfig:
     monitor_input_channel: int = 0
 
     # Rates/chunking
-    input_sr: int = 44100
+    input_sr: int = 48000
     model_sr: int = 24000
     output_sr: int = 48000
     model_chunk: int = 192
@@ -45,7 +45,7 @@ class PipelineConfig:
     mix_dry: float = 0.0
     input_gain_db: float = 0.0
     alpha: float = 0.9999
-    silence_dbfs: float = -50.0
+    silence_dbfs: float = -100.0
     silence_window_frames: int = 8
     fault_min_dbfs: float = -1.0
     fault_max_dbfs: float = 0.0

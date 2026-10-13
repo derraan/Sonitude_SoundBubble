@@ -1,0 +1,12 @@
+---
+description: edge/MIC_INDEX_CANON.md is human-owned; agents must never edit it
+alwaysApply: true
+---
+
+# Mic index canon — agent read-only
+
+- File: [`edge/MIC_INDEX_CANON.md`](edge/MIC_INDEX_CANON.md)
+- **Agents: READ ONLY.** Do not create, edit, rewrite, reformat, fill TBD cells, or “fix” this file.
+- Only the human owner may change it (especially §4 mapping and the `--channel-map` string).
+- When channel order / mic layout comes up: **read** the canon file; quote it; if §4 is still TBD, keep B5 open and tell the user to run the tap probe and update §4 themselves.
+- Do not change launcher/controller default `-ChannelMap` / `channel_map` to a guessed map unless the owner has filled §4 and asked you to apply that exact string elsewhere.

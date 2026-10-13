@@ -22,7 +22,7 @@ if REPO_ROOT not in sys.path:
 from edge.runtime_contract import load_contract
 
 from edge.realtime.contracts import RealtimeContract
-from edge.realtime.audio_io import create_streams, preflight_sounddevice
+from edge.realtime.audio_io import assert_stream_samplerate, create_streams, preflight_sounddevice
 from edge.realtime.drop_oldest_buffer import DropOldestBuffer
 from edge.realtime.ring_buffer import AudioRingBuffer, OutputRingBuffer
 from edge.realtime.dry_reference import DryReferenceRing
@@ -44,7 +44,8 @@ from edge.pipeline.processing import (
 from edge.pipeline.runner import compute_io_blocks, compute_output_ring_params, sustainable_steps
 
 
-DEFAULT_INPUT_SR = 44100
+# Capture at 48 kHz: exact 2× model_sr (24 kHz), matches Pico UAC2 48 kHz clock (B7).
+DEFAULT_INPUT_SR = 48000
 DEFAULT_MODEL_SR = 24000
 DEFAULT_OUTPUT_SR = 48000
 DEFAULT_MODEL_CHANNELS = 6
@@ -153,19 +154,36 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Silent inferences at startup; their median seeds the per-step inference-time estimate.",
     )
+    parser.add_argument(
+        "--allow-untrained",
+        action="store_true",
+        help="Allow loading a zoo/contract entry with trained_epochs=0 (fixture / untrained). Default: refuse.",
+    )
     return parser.parse_args()
 
-def _resolve_zoo_model(zoo_dir: str, bubble_radius: float) -> tuple[str, str, list[float]]:
+
+def _zoo_pick_key(contract) -> tuple:
+    """Rank zoo candidates: skip untrained via filter; prefer count head, then more epochs."""
+    epochs = int(contract.trained_epochs) if contract.trained_epochs is not None else -1
+    count_trained = 1 if contract.count_head_trained else 0
+    return (count_trained, epochs)
+
+
+def _resolve_zoo_model(
+    zoo_dir: str,
+    bubble_radius: float,
+    *,
+    allow_untrained: bool = False,
+) -> tuple[str, str, list[float]]:
     """Scan zoo_dir for paired <name>.onnx + <name>.runtime.json. Match contract.dis_threshold
-    to bubble_radius. Returns (onnx_path, contract_path, available_radii)."""
+    to bubble_radius. Prefer trained count-head models over fixtures. Returns
+    (onnx_path, contract_path, available_radii)."""
     from pathlib import Path as _P
     zoo = _P(zoo_dir)
     if not zoo.is_dir():
         raise FileNotFoundError(f"--zoo-dir does not exist or is not a directory: {zoo_dir}")
-    # Entries are tuples of (offered_radii, contract_path, onnx_path). A single-
-    # distance entry offers {dis_threshold}; a distance-aware entry offers
-    # supported_radii (one model serves multiple radii — used as fallback).
-    found: list[tuple[set[float], _P, _P]] = []
+    # Entries: (offered_radii, contract, contract_path, onnx_path).
+    found: list[tuple[set[float], object, _P, _P]] = []
     for contract_path in sorted(zoo.glob("*.runtime.json")):
         try:
             c = load_contract(contract_path)
@@ -185,19 +203,37 @@ def _resolve_zoo_model(zoo_dir: str, bubble_radius: float) -> tuple[str, str, li
         if not offered:
             print(f"[zoo] skipping {contract_path.name}: no dis_threshold / supported_radii (re-export to record)")
             continue
-        found.append((offered, contract_path, onnx_path))
-    available = sorted({r for offered, _, _ in found for r in offered})
+        found.append((offered, c, contract_path, onnx_path))
+    available = sorted({r for offered, _, _, _ in found for r in offered})
     if not found:
         raise RuntimeError(f"No valid zoo entries found in {zoo_dir}")
     # Prefer single-distance exact match over distance-aware (more specific).
-    single = [(offered, c, o) for offered, c, o in found if len(offered) == 1 and bubble_radius in offered]
-    multi  = [(offered, c, o) for offered, c, o in found if len(offered) > 1 and bubble_radius in offered]
+    single = [(offered, c, cp, o) for offered, c, cp, o in found if len(offered) == 1 and bubble_radius in offered]
+    multi = [(offered, c, cp, o) for offered, c, cp, o in found if len(offered) > 1 and bubble_radius in offered]
     picks = single + multi
     if not picks:
         raise RuntimeError(
             f"--bubble-radius {bubble_radius} not offered by any zoo entry in {zoo_dir}. Available: {available}"
         )
-    _, contract_path, onnx_path = picks[0]
+    # Drop untrained fixtures (trained_epochs == 0); keep entries with unknown epochs.
+    trained = [
+        (offered, c, cp, o)
+        for offered, c, cp, o in picks
+        if c.trained_epochs is None or int(c.trained_epochs) != 0
+    ]
+    if not trained:
+        names = ", ".join(cp.name for _, _, cp, _ in picks)
+        if not allow_untrained:
+            raise RuntimeError(
+                f"--bubble-radius {bubble_radius}m only matches untrained zoo entries ({names}). "
+                "Pass --allow-untrained to force, or export a trained model into the zoo."
+            )
+        print(f"[zoo] only untrained entries for {bubble_radius}m ({names}); --allow-untrained set")
+        trained = picks
+    # Prefer count-head-trained, then highest trained_epochs; keep single-distance preference via
+    # original order when keys tie (sorted is stable).
+    trained.sort(key=lambda row: _zoo_pick_key(row[1]), reverse=True)
+    _, _, contract_path, onnx_path = trained[0]
     return str(onnx_path), str(contract_path), available
 
 
@@ -231,7 +267,11 @@ def main() -> None:
     if args.model is not None and zoo_requested:
         print(f"[zoo] --model given explicitly; ignoring --zoo-dir (--bubble-radius retained for distance-aware ONNX).")
     elif zoo_requested:
-        onnx_path, contract_path, available = _resolve_zoo_model(args.zoo_dir, args.bubble_radius)
+        onnx_path, contract_path, available = _resolve_zoo_model(
+            args.zoo_dir,
+            args.bubble_radius,
+            allow_untrained=bool(args.allow_untrained),
+        )
         args.model = onnx_path
         args.contract_path = contract_path
         print(f"[zoo] dir={args.zoo_dir} available_radii={available} selected={args.bubble_radius}m")
@@ -247,6 +287,14 @@ def main() -> None:
             args.channel_map = ",".join(str(x) for x in contract.expected_channel_map)
         if args.input_channels == 8:
             args.input_channels = contract.expected_input_channels
+        if contract.trained_epochs is not None and int(contract.trained_epochs) == 0:
+            msg = (
+                f"[model] refusing untrained contract {args.contract_path} "
+                f"(trained_epochs=0). Pass --allow-untrained to override."
+            )
+            if not args.allow_untrained:
+                raise SystemExit(msg)
+            print(f"[warn] {msg}")
 
     if args.list_devices:
         list_audio_devices(sd)
@@ -277,13 +325,22 @@ def main() -> None:
     print(f"model={args.model}")
     if contract is not None:
         print(f"contract={args.contract_path}")
+        epochs = contract.trained_epochs if contract.trained_epochs is not None else "?"
+        if contract.supported_radii:
+            radius = f"supported_radii={[f'{r:g}m' for r in contract.supported_radii]}"
+        elif contract.dis_threshold is not None:
+            radius = f"bubble_radius={contract.dis_threshold:g}m"
+        else:
+            radius = "bubble_radius=?"
+        count_tr = "yes" if contract.count_head_trained else "no"
+        dist_tr = "yes" if contract.distance_head_trained else "no"
+        print(
+            f"[model] file={os.path.basename(args.model)} epochs={epochs} {radius} "
+            f"count_head_trained={count_tr} distance_head_trained={dist_tr}"
+        )
         prov = []
         if contract.model_class:
             prov.append(f"class={contract.model_class.rsplit('.', 1)[-1]}")
-        if contract.supported_radii:
-            prov.append(f"supported_radii={[f'{r:g}m' for r in contract.supported_radii]}")
-        elif contract.dis_threshold is not None:
-            prov.append(f"bubble_radius={contract.dis_threshold:g}m")
         if contract.trained_epochs is not None:
             prov.append(f"epochs={contract.trained_epochs}")
         if prov:
@@ -292,6 +349,8 @@ def main() -> None:
             print(f"source_config={contract.source_config}")
         if contract.source_run_dir:
             print(f"source_run_dir={contract.source_run_dir}")
+    else:
+        print(f"[model] file={os.path.basename(args.model)} (no contract)")
     print(f"input_sr={args.input_sr}, model_sr={args.model_sr}, output_sr={args.output_sr}")
     print(f"input_block={input_block}, output_block={output_block}, model_chunk={args.model_chunk}")
     print(f"channel_map={selected_channels}, monitor={args.monitor}")
@@ -934,6 +993,8 @@ def main() -> None:
         )
         input_stream = streams.input_stream
         output_stream = streams.output_stream
+        assert_stream_samplerate(input_stream, expected_sr=args.input_sr, label="input")
+        assert_stream_samplerate(output_stream, expected_sr=args.output_sr, label="output")
         output_stream.start()
         input_stream.start()
         print("[audio] streams started, Ctrl+C to stop")

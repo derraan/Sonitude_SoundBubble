@@ -5,9 +5,9 @@ param(
   [string]$PiRepo   = "/home/sonitude/sb_rt_dev",
   [string]$PiVenv   = "/home/sonitude/Sonitude/Sound_Bubble/.venv",
 
-  # baseline = pre-plan launcher values ("before" numbers)
-  # defaults = only device/model flags; everything else is inference_pipeline.py's defaults
-  # lowlat   = Phase 2 step 7 settings (needs 48 kHz Pico firmware)
+  # baseline = legacy pre-plan launcher values (44.1 kHz — A/B only; avoid for production)
+  # defaults = only device/model flags; pipeline default input_sr is now 48000 (B7)
+  # lowlat   = production low-latency path (48 kHz Pico UAC2 + silence_fill)
   [ValidateSet("baseline", "defaults", "lowlat")]
   [string]$Preset   = "lowlat",
 
@@ -24,6 +24,8 @@ param(
   [int]$OutputChannels  = 2,
   [string]$ChannelMap   = "0,1,2,3,4,5",
   [double]$MixDry       = 0.0,
+  # Quiet INMP441s sit well under -50 dBFS; mute threshold must be lower (B8).
+  [double]$SilenceDbfs  = -100.0,
 
   # Per-run overrides of the preset (0 / "" = use preset value).
   [int]$InputSR           = 0,
@@ -99,10 +101,22 @@ Invoke-Pi $Preflight | Out-Host
 if ($LASTEXITCODE -ne 0) { Write-Host "Fix: $PiVenv/bin/pip install -r edge/requirements_edge.txt" -ForegroundColor Red; exit 1 }
 
 $Flags = [System.Collections.Generic.List[string]]::new()
-if ($Model) { $Flags.Add("--model $Model") } else { $Flags.Add("--zoo-dir $ZooDir --bubble-radius $BubbleRadius") }
+if ($Model) {
+  $Flags.Add("--model $Model")
+  # Pair contract so count/distance heads and trained_epochs metadata load (A3).
+  if ($Model -like "*.onnx") {
+    $ContractPath = ($Model -replace '\.onnx$', '.runtime.json')
+  } else {
+    $ContractPath = "$Model.runtime.json"
+  }
+  $Flags.Add("--contract-path $ContractPath")
+} else {
+  $Flags.Add("--zoo-dir $ZooDir --bubble-radius $BubbleRadius")
+}
 $Flags.Add("--input-device $InputDeviceIdx --output-device $OutputDeviceIdx")
 $Flags.Add("--input-channels $InputChannels --output-channels $OutputChannels --channel-map $ChannelMap")
 $Flags.Add("--mix-dry $MixDry")
+$Flags.Add("--silence-dbfs $SilenceDbfs")
 if ($P.InputSR)          { $Flags.Add("--input-sr $($P.InputSR)") }
 if ($P.HopsPerIo)        { $Flags.Add("--hops-per-io $($P.HopsPerIo)") }
 if ($P.IntraOpThreads)   { $Flags.Add("--intra-op-threads $($P.IntraOpThreads) --inter-op-threads 1") }

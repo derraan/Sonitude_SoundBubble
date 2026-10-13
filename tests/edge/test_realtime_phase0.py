@@ -124,3 +124,108 @@ def test_pipeline_imports_as_module_without_torch():
     code = "import sys, edge.inference_pipeline; sys.exit(1 if 'torch' in sys.modules else 0)"
     res = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
+
+
+ZOO_DIR = REPO_ROOT / "edge" / "zoo"
+EP36_ONNX = ZOO_DIR / "optim_pretrain_sonitude_dist_count_1_5m_ep36.onnx"
+FIXTURE_CONTRACT = ZOO_DIR / "optim_count_distance_fixture_1_5m.runtime.json"
+
+
+@pytest.mark.skipif(not EP36_ONNX.is_file(), reason="ep36 zoo model not present")
+def test_zoo_resolve_prefers_ep36_over_fixture():
+    from edge.inference_pipeline import _resolve_zoo_model
+
+    onnx_path, contract_path, available = _resolve_zoo_model(str(ZOO_DIR), 1.5)
+    assert 1.5 in available
+    assert Path(onnx_path).name == "optim_pretrain_sonitude_dist_count_1_5m_ep36.onnx"
+    assert Path(contract_path).name == "optim_pretrain_sonitude_dist_count_1_5m_ep36.runtime.json"
+
+
+@pytest.mark.skipif(not FIXTURE_CONTRACT.is_file(), reason="fixture contract not present")
+def test_untrained_contract_refused_without_allow_flag():
+    # Explicit --model + untrained contract must exit unless --allow-untrained.
+    cmd = [
+        sys.executable,
+        "-m",
+        "edge.inference_pipeline",
+        "--model",
+        str(ZOO_DIR / "optim_count_distance_fixture_1_5m.onnx"),
+        "--contract-path",
+        str(FIXTURE_CONTRACT),
+        "--list-devices",
+    ]
+    res = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    assert res.returncode != 0
+    assert "refusing untrained" in (res.stderr + res.stdout).lower() or "trained_epochs=0" in (res.stderr + res.stdout)
+
+
+def test_controller_silence_dbfs_default_is_minus_100():
+    cfg = PipelineConfig()
+    assert cfg.silence_dbfs == -100.0
+    argv = build_pipeline_argv(cfg)
+    flags = dict(zip(argv[1::2], argv[2::2]))
+    assert float(flags["--silence-dbfs"]) == -100.0
+
+
+def test_controller_and_pipeline_default_input_sr_is_48000():
+    from edge import inference_pipeline as ip
+
+    assert ip.DEFAULT_INPUT_SR == 48000
+    cfg = PipelineConfig()
+    assert cfg.input_sr == 48000
+    argv = build_pipeline_argv(cfg)
+    flags = dict(zip(argv[1::2], argv[2::2]))
+    assert int(flags["--input-sr"]) == 48000
+
+
+def test_assert_stream_samplerate_rejects_mismatch():
+    from edge.realtime.audio_io import assert_stream_samplerate
+
+    class _Stream:
+        samplerate = 44100.0
+
+    try:
+        assert_stream_samplerate(_Stream(), expected_sr=48000, label="input")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "44100" in str(exc) and "48000" in str(exc)
+
+
+def test_channel_level_validator_silence_threshold_b8():
+    # -60 dBFS is below the old -50 default (muted) but above the new -100 default (kept).
+    amp = 10 ** (-60.0 / 20.0)
+    x = np.full((1, 256), amp, dtype=np.float32)
+
+    mute_old = processing.ChannelLevelValidator(
+        num_channels=1,
+        silence_dbfs=-50.0,
+        fault_min_dbfs=-1.0,
+        fault_max_dbfs=0.0,
+        silence_window_frames=1,
+    )
+    y_old, _, statuses_old = mute_old.validate(x, frame_idx=0)
+    assert statuses_old[0] == "silence"
+    assert float(np.max(np.abs(y_old))) == 0.0
+
+    keep_new = processing.ChannelLevelValidator(
+        num_channels=1,
+        silence_dbfs=-100.0,
+        fault_min_dbfs=-1.0,
+        fault_max_dbfs=0.0,
+        silence_window_frames=1,
+    )
+    y_new, _, statuses_new = keep_new.validate(x, frame_idx=0)
+    assert statuses_new[0] == "ok"
+    assert float(np.max(np.abs(y_new))) > 0.0
+
+
+def test_channel_probe_xcorr_recovers_known_lag():
+    from edge.tools.channel_probe import _xcorr_lag_samples
+
+    rng = np.random.default_rng(0)
+    ref = rng.standard_normal(8000).astype(np.float64)
+    delay = 7
+    sig = np.concatenate([np.zeros(delay), ref[:-delay]])
+    lag, peak = _xcorr_lag_samples(ref, sig, max_lag=32)
+    assert abs(lag - delay) < 0.25
+    assert peak > 0.9
