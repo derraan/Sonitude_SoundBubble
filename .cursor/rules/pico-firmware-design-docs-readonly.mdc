@@ -1,0 +1,22 @@
+---
+description: In-repo Pico firmware design docs are human-owned; agents must never edit them
+alwaysApply: true
+---
+
+# Pico firmware design docs — agent read-only
+
+Vendored tree: `firmware/mic-array-pico2w-usb6ch/` (also the sibling `C:/Users/darre/mic-array-pico2w-usb6ch` if present).
+
+**Agents: READ ONLY** on that tree’s design documentation. Do not edit, rewrite, or “fix” these files.
+
+## Protected
+
+- `firmware/mic-array-pico2w-usb6ch/README.md`
+- `firmware/mic-array-pico2w-usb6ch/OVERRUN.md`
+- `firmware/mic-array-pico2w-usb6ch/skills_planner.md`
+- `firmware/mic-array-pico2w-usb6ch/docs/**` (notes, baselines, schematics, datasheets, PDFs)
+
+## Allowed
+
+- Read for pinout, UAC2 rates, I2S packing, overrun notes.
+- Propose firmware **code** changes under `src/` / `examples/` only if the user asks; never patch design docs to match code unilaterally.

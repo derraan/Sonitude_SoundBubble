@@ -1,0 +1,25 @@
+---
+description: Pico firmware design docs are human-owned; agents must never edit them
+alwaysApply: true
+---
+
+# Firmware design documents — agent read-only
+
+**Agents: READ ONLY.** Do not create, edit, rewrite, reformat, or “fix” firmware design / planning documentation in this repo.
+
+## Protected paths
+
+- `README.md`
+- `OVERRUN.md`
+- `skills_planner.md`
+- `docs/**` (all notes, baselines, schematics, datasheets, PDFs, drawings)
+
+## Allowed
+
+- **Read** these files for architecture, pinout, UAC2, sample-rate, and I2S facts.
+- Edit **code** under `src/`, `examples/`, `boards/`, CMake, etc. only when the user asks for a firmware code change.
+- If docs and code disagree, report it and wait — do not silently rewrite the docs.
+
+## Owner
+
+Only the human owner may change the protected design documents.
