@@ -1,0 +1,58 @@
+# sherpa-onnx prebuilt CPU archive. Keyword spotting is compiled only when this resolves.
+set(SOUNDBUBBLE_SHERPA_VERSION "1.10.46" CACHE STRING "sherpa-onnx release")
+
+if(WIN32)
+  set(_sh_asset "sherpa-onnx-v${SOUNDBUBBLE_SHERPA_VERSION}-win-x64-shared.tar.bz2")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64|arm64")
+  set(_sh_asset "sherpa-onnx-v${SOUNDBUBBLE_SHERPA_VERSION}-linux-aarch64-shared.tar.bz2")
+else()
+  set(_sh_asset "sherpa-onnx-v${SOUNDBUBBLE_SHERPA_VERSION}-linux-x64-shared.tar.bz2")
+endif()
+
+set(_sh_url "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${SOUNDBUBBLE_SHERPA_VERSION}/${_sh_asset}")
+set(_sh_dir "${CMAKE_BINARY_DIR}/_deps/sherpa-onnx")
+
+if(NOT EXISTS "${_sh_dir}/include/sherpa-onnx/c-api/c-api.h")
+  message(STATUS "Fetching sherpa-onnx ${_sh_asset}")
+  set(_archive "${CMAKE_BINARY_DIR}/_deps/${_sh_asset}")
+  file(DOWNLOAD "${_sh_url}" "${_archive}" SHOW_PROGRESS STATUS _st)
+  list(GET _st 0 _code)
+  if(NOT _code EQUAL 0)
+    message(WARNING "sherpa-onnx download failed (${_st}). Wake-word spotting will be unavailable.")
+    set(SOUNDBUBBLE_HAS_SHERPA FALSE PARENT_SCOPE)
+    return()
+  endif()
+  file(SHA256 "${_archive}" _got)
+  message(STATUS "sherpa-onnx archive SHA256=${_got}")
+  file(ARCHIVE_EXTRACT INPUT "${_archive}" DESTINATION "${CMAKE_BINARY_DIR}/_deps")
+  file(GLOB _extracted "${CMAKE_BINARY_DIR}/_deps/sherpa-onnx-*")
+  foreach(_d ${_extracted})
+    if(IS_DIRECTORY "${_d}" AND EXISTS "${_d}/include/sherpa-onnx/c-api/c-api.h")
+      file(MAKE_DIRECTORY "${_sh_dir}")
+      file(GLOB _kids "${_d}/*")
+      file(COPY ${_kids} DESTINATION "${_sh_dir}")
+    endif()
+  endforeach()
+endif()
+
+if(EXISTS "${_sh_dir}/include/sherpa-onnx/c-api/c-api.h")
+  add_library(sherpa-onnx SHARED IMPORTED GLOBAL)
+  if(WIN32)
+    file(GLOB _implib "${_sh_dir}/lib/sherpa-onnx-c-api.lib")
+    file(GLOB _dll "${_sh_dir}/lib/sherpa-onnx-c-api.dll" "${_sh_dir}/bin/sherpa-onnx-c-api.dll")
+    set_target_properties(sherpa-onnx PROPERTIES
+      IMPORTED_IMPLIB "${_implib}"
+      IMPORTED_LOCATION "${_dll}"
+      INTERFACE_INCLUDE_DIRECTORIES "${_sh_dir}/include")
+  else()
+    file(GLOB _so "${_sh_dir}/lib/libsherpa-onnx-c-api.so*")
+    list(GET _so 0 _so0)
+    set_target_properties(sherpa-onnx PROPERTIES
+      IMPORTED_LOCATION "${_so0}"
+      INTERFACE_INCLUDE_DIRECTORIES "${_sh_dir}/include")
+  endif()
+  set(SOUNDBUBBLE_HAS_SHERPA TRUE PARENT_SCOPE)
+  set(SOUNDBUBBLE_SHERPA_ROOT "${_sh_dir}" CACHE INTERNAL "")
+else()
+  set(SOUNDBUBBLE_HAS_SHERPA FALSE PARENT_SCOPE)
+endif()

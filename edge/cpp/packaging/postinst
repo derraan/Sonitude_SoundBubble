@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+if ! id soundbubble >/dev/null 2>&1; then
+  useradd --system --create-home --home-dir /var/lib/soundbubble --shell /usr/sbin/nologin soundbubble || true
+fi
+usermod -aG audio,dialout soundbubble || true
+if [ ! -f /etc/sonitude-soundbubble.env ]; then
+  cp /opt/soundbubble/etc/sonitude-soundbubble.env /etc/sonitude-soundbubble.env 2>/dev/null || true
+fi
+systemctl daemon-reload || true
+exit 0

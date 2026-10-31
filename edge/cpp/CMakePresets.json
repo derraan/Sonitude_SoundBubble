@@ -1,0 +1,50 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "win-x64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/win-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SOUNDBUBBLE_WITH_ORT": "ON",
+        "SOUNDBUBBLE_WITH_PORTAUDIO": "ON",
+        "SOUNDBUBBLE_WITH_SOXR": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "linux-x64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-x64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SOUNDBUBBLE_WITH_ORT": "ON",
+        "SOUNDBUBBLE_WITH_PORTAUDIO": "ON",
+        "SOUNDBUBBLE_WITH_SOXR": "ON"
+      }
+    },
+    {
+      "name": "linux-aarch64",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-aarch64",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "SOUNDBUBBLE_WITH_ORT": "ON",
+        "SOUNDBUBBLE_WITH_PORTAUDIO": "ON",
+        "SOUNDBUBBLE_WITH_SOXR": "ON",
+        "SOUNDBUBBLE_BUILD_TESTS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "win-x64", "configurePreset": "win-x64" },
+    { "name": "linux-x64", "configurePreset": "linux-x64" },
+    { "name": "linux-aarch64", "configurePreset": "linux-aarch64" }
+  ]
+}

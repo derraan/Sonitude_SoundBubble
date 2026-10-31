@@ -1,0 +1,30 @@
+[Unit]
+Description=Sound Bubble Remote Controller
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=sonitude
+Group=sonitude
+SupplementaryGroups=audio
+WorkingDirectory=/home/sonitude/sb_rt_dev
+Environment=PYTHONUNBUFFERED=1
+Environment=SOUNDBUBBLE_ROOT=/home/sonitude/sb_rt_dev
+Environment=SOUNDBUBBLE_RT_BIN=/home/sonitude/sb_rt_dev/edge/cpp/build/pi/soundbubble-rt
+Environment=SOUNDBUBBLE_PYTHON=/home/sonitude/Sonitude/Sound_Bubble/.venv/bin/python
+Environment=SOUNDBUBBLE_SRC_ROOT=/home/sonitude/Sonitude/Sound_Bubble
+# Token lives in this file (SOUND_BUBBLE_CONTROLLER_TOKEN). Required, so the
+# unit stays stopped until the owner installs it.
+EnvironmentFile=/etc/soundbubble-controller.env
+# Tailnet address only. If 100.125.176.100 is missing at start, soundbubble-ctl
+# retries bind for about 30s and exits. Restart= retries until StartLimitBurst,
+# then the unit fails and boot continues.
+ExecStart=/home/sonitude/sb_rt_dev/edge/cpp/build/pi/soundbubble-ctl --host 100.125.176.100 --port 8000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

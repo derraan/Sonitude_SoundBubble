@@ -1,0 +1,111 @@
+name: cpp-runtime
+
+on:
+  pull_request:
+    paths:
+      - "edge/cpp/**"
+      - "edge/inference_pipeline.py"
+      - "edge/controller/**"
+      - "edge/pipeline/**"
+      - "edge/realtime/**"
+      - "edge/wake/**"
+      - ".github/workflows/cpp-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "edge/cpp/**"
+      - "edge/inference_pipeline.py"
+      - "edge/controller/**"
+      - ".github/workflows/cpp-ci.yml"
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            preset: win
+          - os: ubuntu-24.04
+            preset: linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            edge
+            .github
+          sparse-checkout-cone-mode: false
+      - name: Linux packages
+        if: matrix.preset == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libsoxr-dev clang-format python3-numpy
+      - name: Configure
+        run: cmake -S edge/cpp -B edge/cpp/build -DSOUNDBUBBLE_WITH_ORT=ON -DSOUNDBUBBLE_WITH_PORTAUDIO=ON -DSOUNDBUBBLE_WITH_SOXR=ON -DSOUNDBUBBLE_WITH_SHERPA=OFF -DSOUNDBUBBLE_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build edge/cpp/build --parallel
+      - name: Test
+        run: ctest --test-dir edge/cpp/build --output-on-failure
+      - name: Profile contract
+        shell: python
+        run: |
+          python - <<'PY'
+          import subprocess, sys
+          from pathlib import Path
+          sys.path.insert(0, ".")
+          from edge.controller.profile_parser import parse_profile_line
+          line = "[profile] mode=normal  capture_age=1.00ms  capture_gap=0  capture_drained=0  capture->frame=1.00ms  dc=0.10ms  level-valid=0.20ms  frame->infer=0.30ms  infer_mean=8.50ms  infer_total=8.50ms  steps=1  post+out=0.40ms  e2e=12.00ms  drift=+0.00ppm  q=0/1  drops_oldest=0  out_ahead=20.0ms dropped=0 underrun_frames=0  model_ring=8.0ms drops=0 resets=0"
+          parsed = parse_profile_line(line)
+          if not parsed:
+              raise SystemExit("parser rejected sample profile line")
+          print(parsed["infer_ms"])
+          PY
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            edge
+          sparse-checkout-cone-mode: false
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build libsoxr-dev
+      - name: ASan UBSan
+        run: |
+          cmake -S edge/cpp -B edge/cpp/build-asan -DSOUNDBUBBLE_WITH_ORT=OFF -DSOUNDBUBBLE_WITH_PORTAUDIO=OFF -DSOUNDBUBBLE_WITH_SOXR=ON -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build edge/cpp/build-asan --parallel
+          ctest --test-dir edge/cpp/build-asan --output-on-failure
+      - name: TSan
+        run: |
+          cmake -S edge/cpp -B edge/cpp/build-tsan -DSOUNDBUBBLE_WITH_ORT=OFF -DSOUNDBUBBLE_WITH_PORTAUDIO=OFF -DSOUNDBUBBLE_WITH_SOXR=ON -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build edge/cpp/build-tsan --parallel
+          ctest --test-dir edge/cpp/build-tsan --output-on-failure
+
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            edge/cpp
+          sparse-checkout-cone-mode: false
+      - run: sudo apt-get update && sudo apt-get install -y clang-format
+      - name: Report format drift
+        continue-on-error: true
+        run: clang-format --dry-run --Werror edge/cpp/include/soundbubble/*.hpp edge/cpp/src/*.cpp edge/cpp/apps/*.cpp edge/cpp/tests/*.cpp
+
+  arm64-cross:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: |
+            edge/cpp
+          sparse-checkout-cone-mode: false
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+      - name: Cross-configure
+        run: cmake -S edge/cpp -B edge/cpp/build-arm --preset linux-aarch64 -DSOUNDBUBBLE_WITH_ORT=OFF -DSOUNDBUBBLE_WITH_PORTAUDIO=OFF -DSOUNDBUBBLE_WITH_SOXR=OFF -DSOUNDBUBBLE_BUILD_TESTS=OFF || cmake -S edge/cpp -B edge/cpp/build-arm -DCMAKE_TOOLCHAIN_FILE=edge/cpp/cmake/toolchains/aarch64-linux-gnu.cmake -DSOUNDBUBBLE_WITH_ORT=OFF -DSOUNDBUBBLE_WITH_PORTAUDIO=OFF -DSOUNDBUBBLE_WITH_SOXR=OFF -DSOUNDBUBBLE_BUILD_TESTS=OFF
+      - run: cmake --build edge/cpp/build-arm --parallel

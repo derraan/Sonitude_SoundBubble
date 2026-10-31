@@ -1,0 +1,36 @@
+[Unit]
+Description=Sonitude Sound Bubble neural realtime pipeline
+Documentation=file:///opt/soundbubble/share/EDGE_RUNTIME.md
+After=local-fs.target sound.target network-online.target
+Wants=sound.target network-online.target
+Conflicts=sonitude.service
+StartLimitIntervalSec=120
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=soundbubble
+Group=soundbubble
+SupplementaryGroups=audio dialout
+WorkingDirectory=/var/lib/soundbubble
+Environment=SOUNDBUBBLE_ROOT=/home/sonitude/sb_rt_dev
+Environment=SOUNDBUBBLE_RUNTIME=python
+Environment=SOUNDBUBBLE_RT_BIN=/opt/soundbubble/bin/soundbubble-rt
+Environment=SOUNDBUBBLE_LOG_DIR=/var/lib/soundbubble/logs
+EnvironmentFile=-/etc/sonitude-soundbubble.env
+ExecStart=/usr/bin/chrt -f 50 /opt/soundbubble/bin/run.sh
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=20
+LimitRTPRIO=99
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_SYS_NICE CAP_IPC_LOCK
+AmbientCapabilities=CAP_SYS_NICE CAP_IPC_LOCK
+NoNewPrivileges=false
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sonitude-soundbubble
+
+[Install]
+WantedBy=multi-user.target
