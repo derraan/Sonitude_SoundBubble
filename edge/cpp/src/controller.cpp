@@ -17,10 +17,16 @@
 #include <stdexcept>
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
-#include <windows.h>
+#endif
+// winsock2 before windows.h — otherwise winsock.h (v1) is pulled in and conflicts.
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <arpa/inet.h>
