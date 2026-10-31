@@ -41,7 +41,8 @@ jobs:
         if: matrix.preset == 'linux'
         run: sudo apt-get update && sudo apt-get install -y ninja-build libsoxr-dev clang-format python3-numpy
       - name: Configure
-        run: cmake -S edge/cpp -B edge/cpp/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DSOUNDBUBBLE_WITH_ORT=ON -DSOUNDBUBBLE_WITH_PORTAUDIO=ON -DSOUNDBUBBLE_WITH_SOXR=ON -DSOUNDBUBBLE_WITH_SHERPA=OFF -DSOUNDBUBBLE_BUILD_TESTS=ON
+        # Quoted -D value: PowerShell treats bare 3.5 as a float and breaks CMAKE_POLICY_VERSION_MINIMUM.
+        run: cmake -S edge/cpp -B edge/cpp/build "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" -DSOUNDBUBBLE_WITH_ORT=ON -DSOUNDBUBBLE_WITH_PORTAUDIO=ON -DSOUNDBUBBLE_WITH_SOXR=ON -DSOUNDBUBBLE_WITH_SHERPA=OFF -DSOUNDBUBBLE_BUILD_TESTS=ON
       - name: Build
         run: cmake --build edge/cpp/build --parallel
       - name: Test
