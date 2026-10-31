@@ -6,11 +6,16 @@ wandb/
 .DS_Store
 *.tar
 *.tar.gz
+datasets/
 datasets/LibriSpeech/
 datasets/syn_*/
 datasets/_speech_cache/
 .env
 .env.*
+!.env.example
+!.env.*.example
+**/checkpoints/*.pt
+runs/_recovery_*/
 *.egg-info/
 .venv/
 venv/
