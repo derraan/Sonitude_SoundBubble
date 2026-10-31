@@ -41,13 +41,13 @@ jobs:
         if: matrix.preset == 'linux'
         run: sudo apt-get update && sudo apt-get install -y ninja-build libsoxr-dev clang-format python3-numpy
       - name: Configure
-        run: cmake -S edge/cpp -B edge/cpp/build -DSOUNDBUBBLE_WITH_ORT=ON -DSOUNDBUBBLE_WITH_PORTAUDIO=ON -DSOUNDBUBBLE_WITH_SOXR=ON -DSOUNDBUBBLE_WITH_SHERPA=OFF -DSOUNDBUBBLE_BUILD_TESTS=ON
+        run: cmake -S edge/cpp -B edge/cpp/build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DSOUNDBUBBLE_WITH_ORT=ON -DSOUNDBUBBLE_WITH_PORTAUDIO=ON -DSOUNDBUBBLE_WITH_SOXR=ON -DSOUNDBUBBLE_WITH_SHERPA=OFF -DSOUNDBUBBLE_BUILD_TESTS=ON
       - name: Build
         run: cmake --build edge/cpp/build --parallel
       - name: Test
         run: ctest --test-dir edge/cpp/build --output-on-failure
       - name: Profile contract
-        shell: python
+        shell: bash
         run: |
           python - <<'PY'
           import subprocess, sys
