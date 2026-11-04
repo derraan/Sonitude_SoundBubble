@@ -1,0 +1,215 @@
+{
+    "project_name": "SoundBubble_EP24_SynReal_Lean_1_5m_passkeep_nw10",
+    "pl_module": "src.hl_modules.distance_based_hl_module.PLModule",
+    "pl_module_args": {
+        "metrics": [
+            "snr_i",
+            "si_snr_i",
+            "si_sdr_i"
+        ],
+        "model": "src.models.tfgridnet_realtime_clean_optim.net.Net",
+        "init_ckpt": "C:/Users/darre/Sound_Bubble/runs/optim_finetune_promoted_synreal_1_5m_edge_aux_mic0m25_from_ep23/checkpoints/best.pt",
+        "model_params": {
+            "stft_chunk_size": 192,
+            "stft_pad_size": 96,
+            "num_ch": 6,
+            "D": 16,
+            "L": 4,
+            "I": 1,
+            "J": 1,
+            "B": 3,
+            "H": 64,
+            "E": 2,
+            "conv_lstm": true,
+            "lstm_down": 5,
+            "local_atten_len": 50,
+            "use_attn": false,
+            "lookahead": true,
+            "chunk_causal": true,
+            "use_first_ln": true,
+            "merge_method": "early_cat",
+            "count_distance_head": {
+                "enabled": true,
+                "hidden_dim": 32,
+                "num_slots": 2,
+                "fast_tau_s": 0.35,
+                "slow_tau_s": 1.2,
+                "sample_rate": 24000,
+                "active_threshold": 0.5
+            }
+        },
+        "count_distance_head": {
+            "enabled": true,
+            "freeze_backbone": false,
+            "w_count": 0.5,
+            "w_distance": 0.5,
+            "w_activity": 0.1,
+            "vad_threshold_db": -35.0
+        },
+        "distance_sweep_val": {
+            "enabled": true,
+            "every_n_epochs": 5,
+            "bubble_m": 1.5,
+            "target_in_dbfs": -25.0,
+            "speech_path": "C:/Users/darre/Sound_Bubble/datasets/_speech_cache/5694-64038-0000.flac",
+            "rt60_list": [
+                0.2,
+                0.8,
+                1.0,
+                1.6
+            ],
+            "dur_s": 2.0,
+            "passband_ripple": {
+                "w_passband_keep": 0.05,
+                "w_edge": 0.05,
+                "w_suppression": 0.05,
+                "w_passband_ripple": 0.02,
+                "every_n_train_steps": 40,
+                "levels_dbfs": [
+                    -10,
+                    -20,
+                    -30,
+                    -40
+                ],
+                "rt60_list": [
+                    0.2,
+                    0.35,
+                    0.5
+                ],
+                "distances": [
+                    0.8,
+                    1.0,
+                    1.2,
+                    1.4,
+                    1.5,
+                    1.6,
+                    2.0
+                ],
+                "passband_slack_db": 6.0,
+                "min_edge_drop_db": 20.0,
+                "suppression_drop_db": 6.0,
+                "edge_near_m": 1.4,
+                "edge_far_m": 2.0,
+                "bubble_m": 1.5
+            }
+        },
+        "samples_per_speaker_number": 5,
+        "optimizer": "torch.optim.Adam",
+        "optimizer_params": {
+            "lr": 5e-05
+        },
+        "loss": "src.losses.SNRLP.SNRLPLoss",
+        "loss_params": {
+            "snr_loss_name": "snr",
+            "neg_weight": 10
+        },
+        "scheduler": "torch.optim.lr_scheduler.ReduceLROnPlateau",
+        "scheduler_params": {
+            "mode": "min",
+            "patience": 5,
+            "factor": 0.5,
+            "min_lr": 1e-06
+        },
+        "sr": 24000,
+        "grad_clip": 1
+    },
+    "train_dataset": "src.datasets.general_multisrc_dataset_with_perturbations.Dataset",
+    "train_data_args": {
+        "dataset_dirs": [
+            {
+                "path": "C:/Users/darre/Sound_Bubble/datasets/HumanMultiTargetWHAM/omni/train",
+                "max_samples": 7000
+            },
+            {
+                "path": "C:/Users/darre/Sound_Bubble/datasets/syn_1_5m/syn_1_5m/train",
+                "max_samples": 2000
+            },
+            {
+                "path": "C:/Users/darre/Sound_Bubble/datasets/syn_libri_1_5m_rt60/train",
+                "max_samples": 1000
+            }
+        ],
+        "dis_threshold": 1.5,
+        "mic_config": [
+            "mic00",
+            "mic01",
+            "mic02",
+            "mic03",
+            "mic04",
+            "mic05"
+        ],
+        "downsample": 1,
+        "target_mic0_dbfs": -25.0,
+        "perturbations": [
+            {
+                "type": "src.datasets.perturbations.SampleShiftPerturbation.SampleShiftPerturbation",
+                "params": {
+                    "max_shift": 4
+                },
+                "prob": 0.3
+            },
+            {
+                "type": "src.datasets.perturbations.SpeedPerturbation.SpeedPerturbation",
+                "params": {
+                    "min_speed": 0.8,
+                    "max_speed": 1.2
+                },
+                "prob": 0.3
+            },
+            {
+                "type": "src.datasets.perturbations.FrequencyMaskingPerturbation.FrequencyMaskingPerturbation",
+                "params": {
+                    "min_freq_masks": 1,
+                    "max_freq_masks": 512
+                },
+                "prob": 0.3
+            },
+            {
+                "type": "src.datasets.perturbations.ChannelGainPerturbation.ChannelGainPerturbation",
+                "params": {
+                    "max_channel_gain_db": 2
+                },
+                "prob": 0.3
+            }
+        ]
+    },
+    "val_dataset": "src.datasets.general_multisrc_dataset_with_perturbations.Dataset",
+    "val_data_args": {
+        "dataset_dirs": [
+            {
+                "path": "C:/Users/darre/Sound_Bubble/datasets/HumanMultiTargetWHAM/omni/val",
+                "max_samples": 800
+            },
+            {
+                "path": "C:/Users/darre/Sound_Bubble/datasets/syn_1_5m/syn_1_5m/val",
+                "max_samples": 300
+            },
+            {
+                "path": "C:/Users/darre/Sound_Bubble/datasets/syn_libri_1_5m_rt60/val",
+                "max_samples": 100
+            }
+        ],
+        "dis_threshold": 1.5,
+        "prob_neg": 0,
+        "mic_config": [
+            "mic00",
+            "mic01",
+            "mic02",
+            "mic03",
+            "mic04",
+            "mic05"
+        ],
+        "downsample": 1,
+        "target_mic0_dbfs": -25.0
+    },
+    "epochs": 40,
+    "batch_size": 4,
+    "eval_batch_size": 4,
+    "num_workers": 4,
+    "use_amp": false,
+    "_comment_init_ckpt": "Sacred EP24 mic0m25 best.pt (epoch 24). Do not chain failed elev/poskeep+fastmem or collapsed ep35style lean last.pt.",
+    "_comment_run_dir": "runs/optim_finetune_ep24_synreal_lean_passkeep_nw10_from_ep24",
+    "_comment_program": "Fix for ep35style lean collapse (ep25 dry passband ~-99 dBFS). Root cause: SNRLP LogPower floor ~-30 dB * neg_weight 60 dominates positive SNR on real-heavy batches; lean also dropped EP24 passband_ripple aux. Changes: neg_weight 60->10; restore EP24 passband_ripple (passband keep / edge / suppression). Same lean split. See docs/training_iteration_ep24_synreal_lean_passkeep_nw10.md.",
+    "_comment_split": "Train 7000 real + 2000 syn_1_5m + 1000 syn_libri_rt60. Val 800/300/100. target_mic0_dbfs=-25. Same as lean; see docs/dataset_synreal_lean_ep35style.md.",
+    "_comment_sweep": "distance_sweep_val every 5 epochs + train-time passband_ripple aux (every_n_train_steps=40)."
+}

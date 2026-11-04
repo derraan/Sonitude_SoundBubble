@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 try:
     import wandb
-except ModuleNotFoundError:
+except ImportError:  # missing or broken install; --no_wandb still trains
     class _WandbStub:
         class Audio:
             def __init__(self, *args, **kwargs):
@@ -57,7 +57,9 @@ class PLModule(object):
                  distance_head=None,
                  speaker_head=None,
                  steered_head=None,
-                 distance_sweep_val=None):
+                 distance_sweep_val=None,
+                 pos_keep_loss=None,
+                 elev_aux=None):
 
         if distance_head is not None and distance_head.get("enabled", False):
             raise ValueError(
@@ -154,6 +156,12 @@ class PLModule(object):
         # Initaize weights if checkpoint is provided
         # Warning: This will only load the weights of the module
         # called "model" in this class
+        # Optional resume metadata from a .pt init_ckpt (epoch counter / metrics).
+        # Optimizer is intentionally NOT restored here — finetune uses a fresh Adam.
+        self._init_ckpt_resume_epoch = None
+        self._init_ckpt_resume_metrics = None
+        self._init_ckpt_resume_statistics = None
+
         if init_ckpt is not None:
             if init_ckpt.endswith('.ckpt'):
                 state = torch.load(init_ckpt)['state_dict']
@@ -179,8 +187,17 @@ class PLModule(object):
                     mdl.load_state_dict(state)
                 self.model = nn.DataParallel(mdl.model)
             else:
-                state = torch.load(init_ckpt)['model']
-                self._load_init_state(state)
+                blob = torch.load(init_ckpt, map_location="cpu")
+                if isinstance(blob, dict) and "model" in blob:
+                    self._load_init_state(blob["model"])
+                    if "current_epoch" in blob and blob["current_epoch"] is not None:
+                        self._init_ckpt_resume_epoch = int(blob["current_epoch"])
+                    if "metric_values" in blob and blob["metric_values"] is not None:
+                        self._init_ckpt_resume_metrics = blob["metric_values"]
+                    if "statistics" in blob and blob["statistics"] is not None:
+                        self._init_ckpt_resume_statistics = blob["statistics"]
+                else:
+                    self._load_init_state(blob)
 
         # Overlay count/distance head weights from a second checkpoint (e.g. ep93
         # backbone + later head-only or joint-head checkpoint).
@@ -195,29 +212,126 @@ class PLModule(object):
         self.distance_sweep_val_cfg = distance_sweep_val or {}
         self.distance_sweep_val_enabled = bool(self.distance_sweep_val_cfg.get("enabled", False))
 
-        # Passband ripple (RT60≈0.2): val metric always logged with sweep;
-        # train aux loss when w_passband_ripple > 0 (needs trainable backbone).
+        # Edge / passband aux (multi-level × mild RT60). Val sweep still logs ripple.
+        # Train aux when any weight > 0 (needs trainable backbone).
         pr_cfg = self.distance_sweep_val_cfg.get("passband_ripple") or {}
+        edge_cfg = self.distance_sweep_val_cfg.get("edge_aux") or pr_cfg
         self.passband_ripple_w = float(
-            pr_cfg.get("w_passband_ripple", self.distance_sweep_val_cfg.get("w_passband_ripple", 0.0))
+            edge_cfg.get("w_passband_ripple", self.distance_sweep_val_cfg.get("w_passband_ripple", 0.0))
         )
+        self.passband_keep_w = float(edge_cfg.get("w_passband_keep", 0.0))
+        self.edge_w = float(edge_cfg.get("w_edge", 0.0))
+        self.suppression_w = float(edge_cfg.get("w_suppression", 0.0))
         self.passband_ripple_every_n = int(
-            pr_cfg.get("every_n_train_steps", self.distance_sweep_val_cfg.get("passband_ripple_every_n_steps", 10))
-        )
-        self.passband_ripple_rt60 = float(pr_cfg.get("rt60", 0.2))
-        self.passband_ripple_bubble_m = float(
-            pr_cfg.get("bubble_m", self.distance_sweep_val_cfg.get("bubble_m", 1.5))
-        )
-        self.passband_ripple_distances = pr_cfg.get("distances") or self.distance_sweep_val_cfg.get("distances")
-        self._passband_mix_cache = None  # lazy: Tensor [N, 6, T] on CPU
-        self._passband_mix_distances = None
-        self._passband_train_step = 0
-        if self.passband_ripple_w > 0.0 and self.freeze_backbone:
-            print(
-                "[passband_ripple] w_passband_ripple>0 but freeze_backbone=True — "
-                "train ripple loss is skipped until backbone is trainable; "
-                "val/sweep_passband_ripple_0_2_db still logs from distance sweep."
+            edge_cfg.get(
+                "every_n_train_steps",
+                self.distance_sweep_val_cfg.get("passband_ripple_every_n_steps", 40),
             )
+        )
+        self.passband_ripple_rt60 = float(edge_cfg.get("rt60", 0.2))  # legacy single-condition
+        self.passband_ripple_bubble_m = float(
+            edge_cfg.get("bubble_m", self.distance_sweep_val_cfg.get("bubble_m", 1.5))
+        )
+        self.edge_levels_dbfs = edge_cfg.get("levels_dbfs")
+        self.edge_rt60_list = edge_cfg.get("rt60_list")
+        self.passband_ripple_distances = (
+            edge_cfg.get("distances")
+            or pr_cfg.get("distances")
+            or self.distance_sweep_val_cfg.get("distances")
+        )
+        self.passband_slack_db = float(edge_cfg.get("passband_slack_db", 6.0))
+        self.min_edge_drop_db = float(edge_cfg.get("min_edge_drop_db", 20.0))
+        self.suppression_drop_db = float(edge_cfg.get("suppression_drop_db", 6.0))
+        self.edge_near_m = float(edge_cfg.get("edge_near_m", 1.4))
+        self.edge_far_m = float(edge_cfg.get("edge_far_m", 2.0))
+        self._edge_aux_enabled = bool(
+            self.passband_ripple_w > 0.0
+            or self.passband_keep_w > 0.0
+            or self.edge_w > 0.0
+            or self.suppression_w > 0.0
+        )
+        self._use_multi_condition_edge = bool(
+            self.edge_levels_dbfs is not None or self.edge_rt60_list is not None
+            or self.passband_keep_w > 0.0 or self.edge_w > 0.0 or self.suppression_w > 0.0
+        )
+        self._passband_mix_cache = None  # legacy single-condition [N, 6, T]
+        self._passband_mix_distances = None
+        self._edge_mix_cache = None  # dict[(level, rt60)] -> [D, 6, T]
+        self._edge_mix_distances = None
+        self._edge_cache_levels = None
+        self._edge_cache_rt60s = None
+        self._passband_train_step = 0
+        self._last_edge_aux_metrics = {}
+        if self._edge_aux_enabled and self.freeze_backbone:
+            print(
+                "[edge_aux] weights>0 but freeze_backbone=True — "
+                "train edge/passband aux is skipped until backbone is trainable; "
+                "val/sweep_* metrics still log from distance sweep."
+            )
+
+        # Positive keep-energy hinge: when n_speakers>0, penalize est quieter than GT
+        # by more than slack_db. Fights over-gating to ~-90 dBFS on in-bubble clips.
+        pos_keep_cfg = pos_keep_loss or {}
+        self.pos_keep_enabled = bool(pos_keep_cfg.get("enabled", False))
+        self.pos_keep_w = float(pos_keep_cfg.get("weight", 0.5))
+        self.pos_keep_slack_db = float(pos_keep_cfg.get("slack_db", 6.0))
+        if self.pos_keep_enabled:
+            print(
+                f"[pos_keep] enabled weight={self.pos_keep_w} "
+                f"slack_db={self.pos_keep_slack_db}"
+            )
+            if self.freeze_backbone:
+                print(
+                    "[pos_keep] freeze_backbone=True — keep hinge skipped "
+                    "(needs trainable backbone)."
+                )
+
+        # Elevation aux: flatten vertical response / shrink ≈−20° notch on in-bubble keep.
+        elev_cfg = elev_aux or {}
+        # Also allow nesting under distance_sweep_val.elev_aux
+        if not elev_cfg and isinstance(self.distance_sweep_val_cfg.get("elev_aux"), dict):
+            elev_cfg = self.distance_sweep_val_cfg["elev_aux"]
+        self.elev_keep_w = float(elev_cfg.get("w_elev_keep", 0.0))
+        self.elev_notch_w = float(elev_cfg.get("w_elev_notch", 0.0))
+        self.elev_ripple_w = float(elev_cfg.get("w_elev_ripple", 0.0))
+        self.elev_aux_every_n = int(
+            elev_cfg.get("every_n_train_steps", self.passband_ripple_every_n)
+        )
+        self.elev_aux_elevations = elev_cfg.get("elevations_deg")
+        self.elev_aux_distances = elev_cfg.get("distances")
+        self.elev_notch_elevations = elev_cfg.get("notch_elevations_deg")
+        self.elev_ref_elevation = float(elev_cfg.get("ref_elevation_deg", 0.0))
+        self.elev_max_notch_drop_db = float(elev_cfg.get("max_notch_drop_db", 3.0))
+        self.elev_keep_slack_db = float(
+            elev_cfg.get("passband_slack_db", self.passband_slack_db)
+        )
+        self.elev_target_in_dbfs = float(
+            elev_cfg.get(
+                "target_in_dbfs",
+                self.distance_sweep_val_cfg.get("target_in_dbfs", -25.0),
+            )
+        )
+        self.elev_rt60 = float(elev_cfg.get("rt60", 0.2))
+        self._elev_aux_enabled = bool(
+            self.elev_keep_w > 0.0 or self.elev_notch_w > 0.0 or self.elev_ripple_w > 0.0
+        )
+        self._elev_mix_cache = None  # [E, D, 6, T]
+        self._elev_cache_elevations = None
+        self._elev_cache_distances = None
+        self._elev_train_step = 0
+        self._last_elev_aux_metrics = {}
+        if self._elev_aux_enabled:
+            print(
+                f"[elev_aux] enabled w_keep={self.elev_keep_w} "
+                f"w_notch={self.elev_notch_w} w_ripple={self.elev_ripple_w} "
+                f"every_n={self.elev_aux_every_n} "
+                f"max_notch_drop_db={self.elev_max_notch_drop_db}"
+            )
+            if self.freeze_backbone:
+                print(
+                    "[elev_aux] freeze_backbone=True — elev aux skipped "
+                    "(needs trainable backbone)."
+                )
 
         if self.freeze_backbone:
             self._freeze_backbone_for_heads()
@@ -246,6 +360,27 @@ class PLModule(object):
         self.scheduler_params = scheduler_params
         
         self.epoch = 0
+        # Continue epoch numbering from init_ckpt when present (contingency finetune).
+        # Note: best.pt is dumped inside on_epoch_end *before* epoch += 1, so if
+        # metric_values already contains that epoch index, advance by one.
+        if self._init_ckpt_resume_epoch is not None:
+            self.epoch = self._init_ckpt_resume_epoch
+            if self._init_ckpt_resume_metrics is not None:
+                self.metric_values = self._init_ckpt_resume_metrics
+            if self._init_ckpt_resume_statistics is not None:
+                self.statistics = self._init_ckpt_resume_statistics
+            if self.epoch in self.metric_values:
+                print(
+                    f"[init_ckpt] epoch {self.epoch} already logged in metric_values; "
+                    f"starting next epoch {self.epoch + 1}"
+                )
+                self.epoch += 1
+            print(
+                f"[init_ckpt] continuing from current_epoch={self.epoch} "
+                f"(metric_values entries={len(self.metric_values)}; fresh optimizer)"
+            )
+        # First epoch index trained by this run (best.pt only competes from here).
+        self._run_start_epoch = self.epoch
 
     @staticmethod
     def _is_count_distance_head_key(key: str) -> bool:
@@ -549,8 +684,133 @@ class PLModule(object):
             f"w={self.passband_ripple_w}, every_n={self.passband_ripple_every_n})"
         )
 
+    def _ensure_edge_mix_cache(self):
+        if self._edge_mix_cache is not None:
+            return
+        from src.validation.distance_sweep_dbfs import (
+            DEFAULT_EDGE_DISTANCES,
+            DEFAULT_EDGE_LEVELS_DBFS,
+            DEFAULT_EDGE_RT60_LIST,
+            build_edge_aux_mix_cache,
+        )
+
+        cfg = self.distance_sweep_val_cfg
+        cache, dists, levels, rt60s = build_edge_aux_mix_cache(
+            speech_path=cfg.get(
+                "speech_path",
+                r"C:\Users\darre\Sound_Bubble\datasets\_speech_cache\5694-64038-0000.flac",
+            ),
+            levels_dbfs=self.edge_levels_dbfs or DEFAULT_EDGE_LEVELS_DBFS,
+            rt60_list=self.edge_rt60_list or DEFAULT_EDGE_RT60_LIST,
+            distances=self.passband_ripple_distances or DEFAULT_EDGE_DISTANCES,
+            sr=int(cfg.get("sr", self.sr)),
+            dur_s=float(cfg.get("dur_s", 2.0)),
+        )
+        self._edge_mix_cache = cache
+        self._edge_mix_distances = dists
+        self._edge_cache_levels = levels
+        self._edge_cache_rt60s = rt60s
+        print(
+            f"[edge_aux] cached {len(cache)} conditions "
+            f"(levels={levels}, rt60={rt60s}, d={dists}, "
+            f"w_keep={self.passband_keep_w}, w_edge={self.edge_w}, "
+            f"w_supp={self.suppression_w}, w_ripple={self.passband_ripple_w}, "
+            f"every_n={self.passband_ripple_every_n})"
+        )
+
+    @staticmethod
+    def _signal_dbfs(x: torch.Tensor) -> torch.Tensor:
+        """Per-sample dBFS from mean-square energy. x: [B, C, T] or [B, T] -> [B]."""
+        if x.dim() == 3:
+            x = x[:, 0]
+        power = torch.mean(x * x, dim=-1).clamp_min(1e-12)
+        return 10.0 * torch.log10(power)
+
+    def _compute_pos_keep_hinge(self, est, gt, n_speakers):
+        """Hinge when in-bubble est is quieter than GT by more than slack_db.
+
+        Returns (hinge_scalar, mean_est_db_on_positives). Both are 0 if no positives.
+        """
+        pos_mask = n_speakers > 0
+        if not bool(pos_mask.any()):
+            z = est.new_tensor(0.0)
+            return z, z
+        est_db = self._signal_dbfs(est[pos_mask])
+        gt_db = self._signal_dbfs(gt[pos_mask])
+        hinge = torch.relu((gt_db - self.pos_keep_slack_db) - est_db).mean()
+        return hinge, est_db.mean()
+
+    def _ensure_elev_mix_cache(self):
+        if self._elev_mix_cache is not None:
+            return
+        from src.validation.distance_sweep_dbfs import (
+            DEFAULT_ELEV_AUX_DISTANCES,
+            DEFAULT_ELEV_AUX_ELEVATIONS_DEG,
+            build_elev_aux_mix_cache,
+        )
+
+        cfg = self.distance_sweep_val_cfg
+        mixes, elevs, dists = build_elev_aux_mix_cache(
+            speech_path=cfg.get(
+                "speech_path",
+                r"C:\Users\darre\Sound_Bubble\datasets\_speech_cache\5694-64038-0000.flac",
+            ),
+            elevations_deg=self.elev_aux_elevations or DEFAULT_ELEV_AUX_ELEVATIONS_DEG,
+            distances=self.elev_aux_distances or DEFAULT_ELEV_AUX_DISTANCES,
+            target_in_dbfs=self.elev_target_in_dbfs,
+            rt60=self.elev_rt60,
+            sr=int(cfg.get("sr", self.sr)),
+            dur_s=float(cfg.get("dur_s", 2.0)),
+        )
+        self._elev_mix_cache = mixes
+        self._elev_cache_elevations = elevs
+        self._elev_cache_distances = dists
+        print(
+            f"[elev_aux] cached elev×dist grid "
+            f"E={elevs} D={dists} rt60={self.elev_rt60} "
+            f"target={self.elev_target_in_dbfs} dBFS"
+        )
+
+    def _compute_elev_aux_loss(self):
+        """Forward elevation×in-bubble grid; return weighted elev-aux loss."""
+        from src.validation.distance_sweep_dbfs import (
+            DEFAULT_ELEV_NOTCH_DEG,
+            db_fs_torch,
+            elev_aux_losses_torch,
+        )
+
+        self._ensure_elev_mix_cache()
+        device = next(self._inner_model().parameters()).device
+        mixes = self._elev_mix_cache.to(device=device, non_blocking=True)  # [E,D,6,T]
+        e_dim, d_dim = mixes.shape[0], mixes.shape[1]
+        flat = mixes.reshape(e_dim * d_dim, mixes.shape[2], mixes.shape[3])
+        out = self.model({"mixture": flat})["output"]
+        levels = db_fs_torch(out).reshape(e_dim, d_dim)
+        terms = elev_aux_losses_torch(
+            levels,
+            self._elev_cache_elevations,
+            target_in_dbfs=self.elev_target_in_dbfs,
+            passband_slack_db=self.elev_keep_slack_db,
+            notch_elevations_deg=self.elev_notch_elevations or DEFAULT_ELEV_NOTCH_DEG,
+            ref_elevation_deg=self.elev_ref_elevation,
+            max_notch_drop_db=self.elev_max_notch_drop_db,
+        )
+        loss = (
+            self.elev_keep_w * terms["keep_hinge"]
+            + self.elev_notch_w * terms["notch_hinge"]
+            + self.elev_ripple_w * terms["elev_ripple_db"]
+        )
+        self._last_elev_aux_metrics = {
+            "elev_keep_db": float(terms["keep_hinge"].detach().item()),
+            "elev_notch_db": float(terms["notch_hinge"].detach().item()),
+            "elev_ripple_db": float(terms["elev_ripple_db"].detach().item()),
+            "elev_notch_drop_db": float(terms["notch_drop_db"].detach().item()),
+            "elev_ref_passband_db": float(terms["ref_passband_db"].detach().item()),
+        }
+        return loss
+
     def _compute_passband_ripple_loss(self):
-        """Differentiable peak−peak dBFS ripple on RT60≈0.2 passband mixes."""
+        """Legacy single-condition peak−peak dBFS ripple (RT60≈0.2 interior)."""
         from src.validation.distance_sweep_dbfs import db_fs_torch, passband_ripple_torch
 
         self._ensure_passband_mix_cache()
@@ -559,6 +819,48 @@ class PLModule(object):
         out = self.model({"mixture": mixes})["output"]
         levels = db_fs_torch(out)
         return passband_ripple_torch(levels)
+
+    def _compute_edge_aux_loss(self):
+        """Sample one (level, RT60) and return weighted edge-aux loss + metrics."""
+        import random
+
+        from src.validation.distance_sweep_dbfs import db_fs_torch, edge_aux_losses_torch
+
+        self._ensure_edge_mix_cache()
+        level = float(random.choice(self._edge_cache_levels))
+        rt60 = float(random.choice(self._edge_cache_rt60s))
+        device = next(self._inner_model().parameters()).device
+        mixes = self._edge_mix_cache[(level, rt60)].to(device=device, non_blocking=True)
+        out = self.model({"mixture": mixes})["output"]
+        levels = db_fs_torch(out)
+        terms = edge_aux_losses_torch(
+            levels,
+            self._edge_mix_distances,
+            target_in_dbfs=level,
+            edge_near_m=self.edge_near_m,
+            edge_far_m=self.edge_far_m,
+            passband_slack_db=self.passband_slack_db,
+            min_edge_drop_db=self.min_edge_drop_db,
+            bubble_m=self.passband_ripple_bubble_m,
+            suppression_drop_db=self.suppression_drop_db,
+        )
+        loss = (
+            self.passband_keep_w * terms["keep_hinge"]
+            + self.edge_w * terms["edge_hinge"]
+            + self.passband_ripple_w * terms["ripple"]
+            + self.suppression_w * terms["suppression_dev"]
+        )
+        self._last_edge_aux_metrics = {
+            "passband_keep_db": float(terms["keep_hinge"].detach().item()),
+            "edge_drop_db": float(terms["edge_drop_db"].detach().item()),
+            "passband_ripple_db": float(terms["ripple"].detach().item()),
+            "suppression_m": float(terms["suppression_m"].detach().item()),
+            "suppression_dev_m": float(terms["suppression_dev"].detach().item()),
+            "passband_mean_db": float(terms["passband_mean_db"].detach().item()),
+            "edge_level_dbfs": level,
+            "edge_rt60": rt60,
+        }
+        return loss
 
     def _run_and_log_distance_sweep_val(self, best_path):
         """Epoch-end LibriSpeech distance→dBFS sweep (validation monitor)."""
@@ -585,6 +887,8 @@ class PLModule(object):
         )
         summary = sweep["summary"]
         ripple = summary.get("passband_ripple_0_2_db", float("nan"))
+        supp_m = summary.get("suppression_m_m6db", float("nan"))
+        supp_dev = summary.get("suppression_dev_from_bubble_m", float("nan"))
         print(
             "[VAL distance-dBFS sweep] "
             f"0.5m={summary['out_dbfs_0_5m']:.1f}  "
@@ -597,6 +901,8 @@ class PLModule(object):
             f"pass-far={summary['passband_minus_far_db']:.1f}dB  "
             f"edge(1.5->2.0)={summary['edge_drop_1_5_to_2_0_db']:.1f}dB  "
             f"passband_ripple_0.2={ripple:.1f}dB  "
+            f"supp@-6dB={supp_m:.2f}m  "
+            f"|supp-bubble|={supp_dev:.2f}m  "
             f"(bubble={bubble_m}m)"
         )
         for key, value in summary.items():
@@ -618,22 +924,32 @@ class PLModule(object):
 
         # Go over all epochs
         save = True
-        for epoch in range(len(self.metric_values) - 1):
-            monitor_metric_at_epoch = self.get_avg_metric_at_epoch(self.monitor, epoch)
-            
-            if self.monitor_mode == 'max':
-                # If there is any model with monitor larger than current, then
-                # this is not the best model
-                if monitor_metric_last < monitor_metric_at_epoch:
-                    save = False
-                    break
+        if not np.isfinite(monitor_metric_last):
+            # NaN/Inf must never become best.pt (NaN comparisons are always False).
+            save = False
+            print(f"Skipping best checkpoint save: monitor '{self.monitor}' is {monitor_metric_last}")
+        else:
+            # Only compare against epochs trained in *this* run. Epochs inherited
+            # from init_ckpt metric_values were scored on a different val split
+            # (e.g. syn-only EP35 lineage), so comparing to them is meaningless.
+            for epoch in range(self._run_start_epoch, len(self.metric_values) - 1):
+                monitor_metric_at_epoch = self.get_avg_metric_at_epoch(self.monitor, epoch)
+                if not np.isfinite(monitor_metric_at_epoch):
+                    continue
 
-            if self.monitor_mode == 'min':
-                # If there is any model with monitor smaller than current, then
-                # this is not the best model
-                if monitor_metric_last > monitor_metric_at_epoch:
-                    save = False
-                    break
+                if self.monitor_mode == 'max':
+                    # If there is any model with monitor larger than current, then
+                    # this is not the best model
+                    if monitor_metric_last < monitor_metric_at_epoch:
+                        save = False
+                        break
+
+                if self.monitor_mode == 'min':
+                    # If there is any model with monitor smaller than current, then
+                    # this is not the best model
+                    if monitor_metric_last > monitor_metric_at_epoch:
+                        save = False
+                        break
         
         # If this is best, save it
         if save:
@@ -684,9 +1000,10 @@ class PLModule(object):
             for i, sample in enumerate(samples):
                 # TODO: Save spectrograms as well
                 for k in columns:
+                    # soundfile/wandb.Audio reject float16 (common under AMP).
+                    audio = sample[k].detach().permute(1, 0).float().cpu().numpy()
                     wandb_samples.append(wandb.Audio(
-                        sample[k].permute(1, 0).cpu().numpy(),
-                        sample_rate=sr, caption=f'{i}/{k}'))
+                        audio, sample_rate=sr, caption=f'{i}/{k}'))
             run.log({key: wandb_samples}, commit=False, step=self.epoch + 1)
 
         # Log stuff on wandb
@@ -957,14 +1274,35 @@ class PLModule(object):
             look_delta_loss = est.new_tensor(0.0)
             look_delta_mean = est.new_tensor(0.0)
 
-        # Passband ripple aux (RT60≈0.2 peak−peak dBFS inside bubble). Lower is better.
-        # Only applied when weight > 0 and backbone is trainable (affects main output).
-        passband_ripple_loss = est.new_tensor(0.0)
-        if self.passband_ripple_w > 0.0 and step == "train" and not self.freeze_backbone:
+        # Edge / passband aux (multi-level × mild RT60, or legacy single-condition ripple).
+        edge_aux_loss = est.new_tensor(0.0)
+        if self._edge_aux_enabled and step == "train" and not self.freeze_backbone:
             self._passband_train_step += 1
             if self._passband_train_step % max(1, self.passband_ripple_every_n) == 0:
-                passband_ripple_loss = self._compute_passband_ripple_loss()
-                loss = loss + self.passband_ripple_w * passband_ripple_loss
+                if self._use_multi_condition_edge:
+                    edge_aux_loss = self._compute_edge_aux_loss()
+                else:
+                    edge_aux_loss = self.passband_ripple_w * self._compute_passband_ripple_loss()
+                    self._last_edge_aux_metrics = {
+                        "passband_ripple_db": float(edge_aux_loss.detach().item()),
+                    }
+                loss = loss + edge_aux_loss
+
+        # Elevation aux (shrink ≈−20° vertical notch on in-bubble keep).
+        elev_aux_loss = est.new_tensor(0.0)
+        if self._elev_aux_enabled and step == "train" and not self.freeze_backbone:
+            self._elev_train_step += 1
+            if self._elev_train_step % max(1, self.elev_aux_every_n) == 0:
+                elev_aux_loss = self._compute_elev_aux_loss()
+                loss = loss + elev_aux_loss
+
+        # Positive keep-energy hinge (in-bubble samples must not collapse to silence).
+        pos_keep_hinge = est.new_tensor(0.0)
+        pos_keep_est_db = est.new_tensor(0.0)
+        if self.pos_keep_enabled and not self.freeze_backbone:
+            pos_keep_hinge, pos_keep_est_db = self._compute_pos_keep_hinge(est, gt, n_speakers)
+            if step == "train":
+                loss = loss + self.pos_keep_w * pos_keep_hinge
 
         est_detached = est.detach().clone()
         
@@ -973,6 +1311,25 @@ class PLModule(object):
             # Log loss
             self.log_metric(f'{step}/loss', loss.item(), batch_size=batch_size, on_step=(step == 'train'), on_epoch=True, prog_bar=True, sync_dist=True)
             self.log_metric(f'{step}/audio_loss', audio_loss.item(), batch_size=batch_size, on_step=(step == 'train'), on_epoch=True, prog_bar=False, sync_dist=True)
+            if self.pos_keep_enabled and not self.freeze_backbone:
+                self.log_metric(
+                    f'{step}/pos_keep_db',
+                    float(pos_keep_hinge.detach().item()),
+                    batch_size=batch_size,
+                    on_step=(step == 'train'),
+                    on_epoch=True,
+                    prog_bar=True,
+                    sync_dist=True,
+                )
+                self.log_metric(
+                    f'{step}/pos_keep_est_db',
+                    float(pos_keep_est_db.detach().item()),
+                    batch_size=batch_size,
+                    on_step=(step == 'train'),
+                    on_epoch=True,
+                    prog_bar=False,
+                    sync_dist=True,
+                )
             if self.count_distance_head_enabled:
                 self.log_metric(f'{step}/count_loss', count_loss.item(), batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
                 self.log_metric(f'{step}/count_acc', count_acc.item(), batch_size=batch_size, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
@@ -1020,16 +1377,46 @@ class PLModule(object):
                     self._steered_train_step += 1
                 if do_sweep:
                     self._theta0_sweep_look_deltas(inputs, targets, est_detached, step, batch_size)
-            if self.passband_ripple_w > 0.0 and step == "train" and passband_ripple_loss.item() != 0.0:
+            if self._edge_aux_enabled and step == "train" and edge_aux_loss.item() != 0.0:
                 self.log_metric(
-                    f'{step}/passband_ripple_db',
-                    passband_ripple_loss.item(),
+                    f'{step}/edge_aux_loss',
+                    edge_aux_loss.item(),
                     batch_size=1,
                     on_step=True,
                     on_epoch=True,
                     prog_bar=True,
                     sync_dist=True,
                 )
+                for key, value in self._last_edge_aux_metrics.items():
+                    self.log_metric(
+                        f'{step}/{key}',
+                        float(value),
+                        batch_size=1,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=(key in ("suppression_m", "edge_drop_db", "passband_ripple_db")),
+                        sync_dist=True,
+                    )
+            if self._elev_aux_enabled and step == "train" and elev_aux_loss.item() != 0.0:
+                self.log_metric(
+                    f'{step}/elev_aux_loss',
+                    elev_aux_loss.item(),
+                    batch_size=1,
+                    on_step=True,
+                    on_epoch=True,
+                    prog_bar=True,
+                    sync_dist=True,
+                )
+                for key, value in self._last_elev_aux_metrics.items():
+                    self.log_metric(
+                        f'{step}/{key}',
+                        float(value),
+                        batch_size=1,
+                        on_step=True,
+                        on_epoch=True,
+                        prog_bar=(key in ("elev_notch_drop_db", "elev_ripple_db")),
+                        sync_dist=True,
+                    )
 
             # Log metrics
             for metric in self.metrics:
@@ -1132,7 +1519,7 @@ class PLModule(object):
         return loss, n_speakers.shape[0]
     
     def reset_grad(self):
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
 
     def backprop(self):
         #print("BACKPROP")

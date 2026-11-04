@@ -2,6 +2,7 @@
 Torch dataset object for synthetically rendered spatial data.
 """
 import os
+import random
 from pathlib import Path
 from typing import Tuple
 
@@ -49,6 +50,7 @@ class Dataset(torch.utils.data.Dataset):
         reference_channels=None,
         split="val",
         steered_targets=None,
+        target_mic0_dbfs=None,
     ):
         super().__init__()
         if perturbations is None:
@@ -60,7 +62,17 @@ class Dataset(torch.utils.data.Dataset):
         for dataset_cfg in dataset_dirs:
             dirpath = dataset_cfg["path"]
             limit = int(dataset_cfg["max_samples"])
-            samples = sorted(list(Path(dirpath).glob("[0-9]*")))[:limit]
+            pool = sorted(list(Path(dirpath).glob("[0-9]*")))
+            # Generated corpora are stored grouped by label (e.g. syn_1_5m:
+            # 00000-03333 are all n_in=0, i.e. empty-GT negatives). Taking the
+            # first N would hand a capped split 100% negatives, so a capped pool
+            # draws a seeded random subset instead. "subset": "first" restores
+            # the legacy (biased) behaviour for archaeology only.
+            if limit < len(pool) and dataset_cfg.get("subset", "random") != "first":
+                rng = random.Random(int(dataset_cfg.get("subset_seed", 0)))
+                samples = sorted(rng.sample(pool, limit))
+            else:
+                samples = pool[:limit]
             self.dirs.extend(samples)
 
         self.downsample = downsample
@@ -78,6 +90,11 @@ class Dataset(torch.utils.data.Dataset):
         self.sig_len = int(sig_len * sr / downsample)
         self.perturbations = AudioPerturbations(perturbations)
         self.split = split
+        # Match runtime/sweep operating point (INPUT_GAIN → model_in ≈ −25 dBFS).
+        # Applied after crop, before train perturbations; same scalar on mixture + GTs.
+        self.target_mic0_dbfs = (
+            None if target_mic0_dbfs is None else float(target_mic0_dbfs)
+        )
 
         steered_cfg = steered_targets or {}
         self.steered_enabled = bool(steered_cfg.get("enabled", False))
@@ -111,6 +128,13 @@ class Dataset(torch.utils.data.Dataset):
     def get_mixture_and_gt(self, curr_dir, dis_threshold):
         metadata = utils.read_json(os.path.join(curr_dir, "metadata.json"))
         voices = [key for key in metadata.keys() if "voice" in key]
+        # Real HumanMultiTargetWHAM labels WHAM noise as voice* with speaker_id=="noise"
+        # and often omits n_BG. Keep those out of speaker / bubble-target counts.
+        noise_voices = [
+            v for v in voices
+            if str(metadata[v].get("speaker_id", "")).lower() == "noise"
+        ]
+        speech_voices = [v for v in voices if v not in noise_voices]
         mics = self.mic_lists
         mics_all = [key for key in metadata.keys() if "mic" in key]
 
@@ -130,7 +154,7 @@ class Dataset(torch.utils.data.Dataset):
         inside_speakers = []
 
         real = metadata["real"]
-        for voice in voices:
+        for voice in speech_voices:
             # Synthetic metadata stores metres from array center. Real metadata
             # stores centimetres from recording mic origin and is converted here.
             d = int(metadata[voice]["dis"]) / 100 if real else metadata[voice]["dis"]
@@ -184,6 +208,17 @@ class Dataset(torch.utils.data.Dataset):
             ]
             for spk_meta in inside_speakers:
                 spk_meta["ref_audio"] = spk_meta["ref_audio"][begin_idx : begin_idx + self.sig_len]
+
+        # Per-clip mic0 level match (syn was ~−19.5 dBFS, real WHAM ~−41 dBFS).
+        if self.target_mic0_dbfs is not None:
+            mic0 = mixture[0]
+            rms = float(torch.sqrt(torch.mean(mic0 * mic0) + 1e-12).item())
+            cur_db = 20.0 * float(np.log10(max(rms, 1e-12)))
+            gain = 10.0 ** ((self.target_mic0_dbfs - cur_db) / 20.0)
+            mixture = mixture * gain
+            target_voice_inside = target_voice_inside * gain
+            for spk_meta in inside_speakers:
+                spk_meta["ref_audio"] = spk_meta["ref_audio"] * gain
 
         inside_speakers = sorted(inside_speakers, key=lambda x: x["distance_m"])
         max_slots = 2
@@ -314,8 +349,8 @@ class Dataset(torch.utils.data.Dataset):
             "targets_outside": target_voice_outside.float(),
             "num_target_speakers": num_tgt_speakers,
             "num_target_speakers_clamped": min(num_tgt_speakers, max_slots),
-            "num_interfering_speakers": len(voices) - num_tgt_speakers,
-            "num_noises": metadata["n_BG"],
+            "num_interfering_speakers": max(0, len(speech_voices) - num_tgt_speakers),
+            "num_noises": int(metadata["n_BG"]) if "n_BG" in metadata else len(noise_voices),
             "distance_m": torch.tensor(distance_m, dtype=torch.float32),
             "distance_valid": torch.tensor(distance_valid, dtype=torch.float32),
             "spk_distance_m": spk_distance_m,
