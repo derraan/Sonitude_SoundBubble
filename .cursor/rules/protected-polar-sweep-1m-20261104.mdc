@@ -1,0 +1,33 @@
+---
+description: Never delete/move/overwrite the valid 1 m polar azimuth sweep (run_20261104_040645_1abaf4), its analysis, or its write-up
+alwaysApply: true
+---
+
+# Protected: valid polar sweep @ 1 m (EP35, 2026-11-04)
+
+Owner-validated reference measurement. Treat it like the sacred EP24 artifacts.
+
+## Protected paths (NEVER delete, move, truncate, overwrite, re-record into, or "clean up")
+
+- `measure/run_20261104_040645_1abaf4/` — **entire folder**: 13 `polar_*` trials (raw_8ch / mapped_6ch / dry_ref / wet_out / hats WAVs, trial.json with `"valid": true`, metrics.json, plots), `run.json`, `telemetry.jsonl`, `PROTECTED.md`
+- `measure/run_20261104_040645_1abaf4/analysis/` (valid-only polar aggregate)
+- `measure/run_20261104_040645_1abaf4/analysis/offline_ep35_20261104/` (offline replay, history curve, scripts, figures, wavs)
+- `docs/polar_sweep_1m_ep35_20261104.md`, `docs/img/polar_offline_ep35_20261104/`, `docs/img/offline_elev_norm_20261104/`, `docs/img/offline_elev_wideband_20261104/`
+- `measure/run_20261104_040645_1abaf4/analysis/offline_elev_wideband_20261104/` (wideband-only corrected elevation evaluation, current)
+- `measure/run_20261104_040645_1abaf4/analysis/offline_elev_norm_20261104/` (per-pose normalized elevation evaluation, superseded, keep)
+
+## Agents MUST NOT
+
+- `rm` / `Remove-Item` / `git clean` / Recycle-Bin / move any path above, including during "delete old polar tests" or measure/ cleanups
+- Re-run testbench takes into this run, or send `TAP dir` at these trial folders
+- Overwrite existing JSON/WAV/PNG here (re-analysis outputs go to **new** paths)
+- Flip `"valid"` / `"validity_status"` marks (pass / check) in these trial.json files, or undo the owner-approved −60/−30 elevation relabel
+- Delete `analysis/relabel_backup_20261104/` (pre-relabel originals)
+
+## Agents MAY
+
+- Read, copy elsewhere, replay offline (`--input-wav`) to new output paths
+- Add **new** files inside `analysis/offline_ep35_20261104/` (e.g. completed channel-order screen) without overwriting
+- Run `analyze_run` for this run only if it writes nothing outside `analysis/` and the owner asked
+
+If a task seems to require deleting or overwriting any of this, stop and ask the owner.
