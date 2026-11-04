@@ -1,5 +1,8 @@
 # Pi bring-up for soundbubble-rt
 
+Windows testbench build + Class B probe:
+[`WINDOWS_BUILD.md`](WINDOWS_BUILD.md).
+
 One systemd unit (`sonitude-soundbubble`) runs either Python or C++. Flip with
 `SOUNDBUBBLE_RUNTIME`; do not add a second audio service (both would fight the Pico).
 

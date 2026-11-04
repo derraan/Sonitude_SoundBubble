@@ -78,6 +78,31 @@ MixLine parse_mix_line(std::string_view line) {
   return out;
 }
 
+TapUartCmd parse_tap_uart_line(std::string_view line) {
+  while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || std::isspace(static_cast<unsigned char>(line.back())))) {
+    line.remove_suffix(1);
+  }
+  size_t i = 0;
+  while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+  if (line.size() < i + 3) return TapUartCmd::None;
+  auto head = line.substr(i, 3);
+  if (!(head[0] == 'T' || head[0] == 't') || !(head[1] == 'A' || head[1] == 'a') || !(head[2] == 'P' || head[2] == 'p')) {
+    return TapUartCmd::None;
+  }
+  i += 3;
+  while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+  if (i >= line.size()) return TapUartCmd::Toggle;
+  std::string arg;
+  while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i]))) {
+    arg.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(line[i++]))));
+  }
+  if (arg.empty() || arg == "toggle") return TapUartCmd::Toggle;
+  if (arg == "on" || arg == "arm") return TapUartCmd::On;
+  if (arg == "off" || arg == "disarm") return TapUartCmd::Off;
+  if (arg == "flush") return TapUartCmd::Flush;
+  return TapUartCmd::None;
+}
+
 MixControl::MixControl(std::string port, int baud, float initial_dry)
     : port_(std::move(port)), baud_(baud), dry_(std::clamp(initial_dry, 0.f, 1.f)) {}
 
@@ -85,13 +110,24 @@ MixControl::~MixControl() { stop(); }
 
 void MixControl::ingest_for_test(std::string_view bytes) { consume(bytes); }
 
+TapUartCmd MixControl::take_tap_cmd() {
+  int expected = tap_cmd_.exchange(static_cast<int>(TapUartCmd::None));
+  return static_cast<TapUartCmd>(expected);
+}
+
 void MixControl::consume(std::string_view chunk) {
   pending_.append(chunk.data(), chunk.size());
   size_t nl;
   while ((nl = pending_.find('\n')) != std::string::npos) {
-    auto parsed = parse_mix_line(pending_.substr(0, nl));
+    std::string_view line = pending_.substr(0, nl);
     pending_.erase(0, nl + 1);
-    if (parsed.ok) dry_.store(parsed.dry);
+    auto parsed = parse_mix_line(line);
+    if (parsed.ok) {
+      dry_.store(parsed.dry);
+      continue;
+    }
+    auto tap = parse_tap_line(line);
+    if (tap != TapUartCmd::None) tap_cmd_.store(static_cast<int>(tap));
   }
 }
 

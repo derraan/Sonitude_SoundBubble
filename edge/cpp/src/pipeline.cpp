@@ -7,11 +7,15 @@
 #include "soundbubble/wav.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <map>
+#include <mutex>
 #include <sstream>
 
 namespace soundbubble {
@@ -44,6 +48,242 @@ class DryPath {
   StreamingResampler src_;
 };
 
+// In-memory WAV tap buffers. Append from the worker (or duplex callback); flush on stop/EOS.
+class TapRecorder {
+ public:
+  struct Select {
+    bool raw = false;
+    bool mapped = true;
+    bool dry = true;
+    bool wet = true;
+  };
+
+  static Select parse_select(const std::string& text) {
+    Select s{false, false, false, false};
+    std::string token;
+    std::istringstream iss(text);
+    while (std::getline(iss, token, ',')) {
+      // trim spaces
+      size_t b = token.find_first_not_of(" \t");
+      size_t e = token.find_last_not_of(" \t");
+      if (b == std::string::npos) continue;
+      token = token.substr(b, e - b + 1);
+      if (token == "raw") s.raw = true;
+      else if (token == "mapped") s.mapped = true;
+      else if (token == "dry") s.dry = true;
+      else if (token == "wet") s.wet = true;
+      else if (token == "all") {
+        s.raw = s.mapped = s.dry = s.wet = true;
+      } else {
+        throw std::runtime_error("unknown --tap-select token: " + token + " (want raw,mapped,dry,wet)");
+      }
+    }
+    if (!s.raw && !s.mapped && !s.dry && !s.wet) {
+      s.mapped = s.dry = s.wet = true;  // plan default: 6ch + dry + wet
+    }
+    return s;
+  }
+
+  TapRecorder(std::string dir, Select sel, double max_seconds, double max_mb, int input_sr, int output_sr, int raw_ch,
+              int mapped_ch)
+      : dir_(std::move(dir)),
+        sel_(sel),
+        max_seconds_(std::max(0.0, max_seconds)),
+        max_bytes_(static_cast<std::uint64_t>(std::max(0.0, max_mb) * 1024.0 * 1024.0)),
+        input_sr_(std::max(1, input_sr)),
+        output_sr_(std::max(1, output_sr)),
+        raw_ch_(std::max(1, raw_ch)),
+        mapped_ch_(std::max(1, mapped_ch)),
+        armed_(true) {
+    namespace fs = std::filesystem;
+    fs::create_directories(dir_);
+    // Pre-reserve to keep appends allocation-light on the worker / callback path.
+    const size_t in_frames = max_seconds_ > 0 ? static_cast<size_t>(max_seconds_ * input_sr_) + 1 : 0;
+    const size_t out_frames = max_seconds_ > 0 ? static_cast<size_t>(max_seconds_ * output_sr_) + 1 : 0;
+    if (sel_.raw && in_frames > 0) raw_.reserve(in_frames * static_cast<size_t>(raw_ch_));
+    if (sel_.mapped && in_frames > 0) mapped_.reserve(in_frames * static_cast<size_t>(mapped_ch_));
+    if (sel_.dry && out_frames > 0) dry_.reserve(out_frames);
+    if (sel_.wet && out_frames > 0) wet_.reserve(out_frames);
+    std::cout << "[tap] armed dir=" << dir_ << " select="
+              << (sel_.raw ? "raw," : "") << (sel_.mapped ? "mapped," : "") << (sel_.dry ? "dry," : "")
+              << (sel_.wet ? "wet" : "") << " max_seconds=" << max_seconds_ << " max_mb=" << (max_mb) << "\n";
+  }
+
+  bool armed() const { return armed_.load(std::memory_order_relaxed); }
+  bool want_raw() const { return sel_.raw; }
+  bool want_mapped() const { return sel_.mapped; }
+  bool want_dry() const { return sel_.dry; }
+  bool want_wet() const { return sel_.wet; }
+
+  void arm() { set_armed(true); }
+  void disarm() { set_armed(false); }
+  void toggle() { set_armed(!armed()); }
+
+  void set_armed(bool on) {
+    armed_.store(on, std::memory_order_relaxed);
+    if (on) capped_ = false;  // re-arm after a cap hit allows a fresh segment
+    std::cout << "[tap] " << (on ? "armed" : "disarmed") << "\n";
+  }
+
+  // Clear buffers and point at a new directory without writing WAVs.
+  void retarget(const std::string& dir) {
+    std::lock_guard<std::mutex> lock(flush_mu_);
+    {
+      std::lock_guard<std::mutex> lk(buf_mu_);
+      raw_.clear();
+      mapped_.clear();
+      dry_.clear();
+      wet_.clear();
+      bytes_ = 0;
+      capped_ = false;
+      armed_.store(false, std::memory_order_relaxed);
+    }
+    dir_ = dir;
+    written_.clear();
+    std::filesystem::create_directories(dir_);
+    std::cout << "[tap] dir=" << dir_ << " (cleared, disarmed)\n";
+  }
+
+  const std::string& dir() const { return dir_; }
+
+  void append_raw_interleaved(const float* data, int frames, int channels) {
+    if (!armed() || !sel_.raw || capped_ || frames <= 0 || !data) return;
+    std::lock_guard<std::mutex> lk(buf_mu_);
+    if (!armed()) return;
+    append_interleaved(raw_, data, frames, channels, input_sr_);
+  }
+
+  // planar: channel-major [c * frames + t]
+  void append_mapped_planar(const float* planar, int channels, int frames) {
+    if (!armed() || !sel_.mapped || capped_ || frames <= 0 || channels <= 0 || !planar) return;
+    std::lock_guard<std::mutex> lk(buf_mu_);
+    if (!armed()) return;
+    if (check_cap(static_cast<size_t>(frames) * static_cast<size_t>(channels) * sizeof(float), frames, input_sr_)) return;
+    const size_t n = static_cast<size_t>(frames) * static_cast<size_t>(channels);
+    const size_t old = mapped_.size();
+    mapped_.resize(old + n);
+    for (int t = 0; t < frames; ++t) {
+      for (int c = 0; c < channels; ++c) {
+        mapped_[old + static_cast<size_t>(t * channels + c)] = planar[static_cast<size_t>(c * frames + t)];
+      }
+    }
+  }
+
+  void append_dry(const float* mono, int frames) {
+    if (!armed() || !sel_.dry || capped_ || frames <= 0 || !mono) return;
+    std::lock_guard<std::mutex> lk(buf_mu_);
+    if (!armed()) return;
+    append_interleaved(dry_, mono, frames, 1, output_sr_);
+  }
+
+  void append_wet(const float* mono, int frames) {
+    if (!armed() || !sel_.wet || capped_ || frames <= 0 || !mono) return;
+    std::lock_guard<std::mutex> lk(buf_mu_);
+    if (!armed()) return;
+    append_interleaved(wet_, mono, frames, 1, output_sr_);
+  }
+
+  // A flush closes the segment: disarm + swap buffers out atomically, then write
+  // outside the buffer lock (the audio worker never waits on disk I/O). Without
+  // the disarm, frames kept accumulating between "TAP flush" and "TAP disarm"
+  // and a later flush (e.g. pipeline stop) overwrote the take's WAVs.
+  void flush() {
+    std::lock_guard<std::mutex> lock(flush_mu_);
+    std::vector<float> raw, mapped, dry, wet;
+    {
+      std::lock_guard<std::mutex> lk(buf_mu_);
+      const bool was_armed = armed_.exchange(false, std::memory_order_relaxed);
+      if (was_armed) std::cout << "[tap] disarmed (flush closes segment)\n";
+      raw.swap(raw_);
+      mapped.swap(mapped_);
+      dry.swap(dry_);
+      wet.swap(wet_);
+      bytes_ = 0;
+      // Keep capped_ so a post-cap flush does not reopen logging until toggle/re-arm.
+    }
+    write_one("raw_8ch.wav", input_sr_, raw_ch_, raw, sel_.raw);
+    write_one("mapped_6ch.wav", input_sr_, mapped_ch_, mapped, sel_.mapped);
+    write_one("dry_ref.wav", output_sr_, 1, dry, sel_.dry);
+    write_one("wet_out.wav", output_sr_, 1, wet, sel_.wet);
+  }
+
+ private:
+  bool check_cap(size_t add_bytes, int add_frames, int sr) {
+    if (capped_) return true;
+    const std::uint64_t next_bytes = bytes_ + static_cast<std::uint64_t>(add_bytes);
+    if (max_bytes_ > 0 && next_bytes > max_bytes_) {
+      stop_cap("max-mb");
+      return true;
+    }
+    // Duration cap uses the longest stream so far + this append at its sample rate.
+    if (max_seconds_ > 0 && sr > 0) {
+      const double raw_sec = raw_ch_ > 0 ? static_cast<double>(raw_.size() / static_cast<size_t>(raw_ch_)) / input_sr_ : 0.0;
+      const double mapped_sec =
+          mapped_ch_ > 0 ? static_cast<double>(mapped_.size() / static_cast<size_t>(mapped_ch_)) / input_sr_ : 0.0;
+      const double dry_sec = static_cast<double>(dry_.size()) / output_sr_;
+      const double wet_sec = static_cast<double>(wet_.size()) / output_sr_;
+      const double this_sec = static_cast<double>(add_frames) / static_cast<double>(sr);
+      const double longest = std::max({raw_sec, mapped_sec, dry_sec, wet_sec}) + this_sec;
+      if (longest > max_seconds_) {
+        stop_cap("max-seconds");
+        return true;
+      }
+    }
+    bytes_ = next_bytes;
+    return false;
+  }
+
+  void stop_cap(const char* why) {
+    if (capped_) return;
+    capped_ = true;
+    armed_.store(false, std::memory_order_relaxed);
+    std::cout << "[tap] stopped: cap reached (" << why << ")\n";
+  }
+
+  void append_interleaved(std::vector<float>& buf, const float* data, int frames, int channels, int sr) {
+    const size_t n = static_cast<size_t>(frames) * static_cast<size_t>(channels);
+    if (check_cap(n * sizeof(float), frames, sr)) return;
+    buf.insert(buf.end(), data, data + n);
+  }
+
+  void write_one(const char* name, int sr, int ch, const std::vector<float>& data, bool enabled) {
+    if (!enabled || data.empty()) return;
+    // Never clobber a file this recorder already wrote into the current dir:
+    // later segments land in <stem>.partN.wav so a take's WAVs stay intact.
+    std::string out_name = name;
+    int& seg = written_[name];
+    seg += 1;
+    if (seg > 1) {
+      std::string stem = out_name.substr(0, out_name.rfind('.'));
+      out_name = stem + ".part" + std::to_string(seg) + ".wav";
+      std::cout << "[tap] " << name << " already written in this dir; saving segment as " << out_name << "\n";
+    }
+    const std::filesystem::path final_path = std::filesystem::path(dir_) / out_name;
+    write_wav_atomic(final_path.string(), sr, ch, data);
+    std::cout << "[tap] wrote " << final_path.string()
+              << " frames=" << (data.size() / static_cast<size_t>(std::max(1, ch))) << "\n";
+  }
+
+  std::string dir_;
+  Select sel_;
+  double max_seconds_ = 120.0;
+  std::uint64_t max_bytes_ = 0;
+  int input_sr_ = 24000;
+  int output_sr_ = 48000;
+  int raw_ch_ = 8;
+  int mapped_ch_ = 6;
+  std::atomic<bool> armed_{false};
+  bool capped_ = false;
+  std::uint64_t bytes_ = 0;
+  std::vector<float> raw_;
+  std::vector<float> mapped_;
+  std::vector<float> dry_;
+  std::vector<float> wet_;
+  std::mutex flush_mu_;
+  std::mutex buf_mu_;  // guards raw_/mapped_/dry_/wet_/bytes_ (worker appends vs flush)
+  std::map<std::string, int> written_;  // files written into dir_ since last retarget
+};
+
 namespace {
 
 double now_sec() {
@@ -60,6 +300,10 @@ Engine::~Engine() {
   if (worker_.joinable()) worker_.join();
   if (wake_) wake_->stop();
   if (mix_) mix_->stop();
+  try {
+    flush_taps();
+  } catch (...) {
+  }
 }
 
 void Engine::set_inferencer_for_test(std::unique_ptr<Inferencer> inf) { infer_ = std::move(inf); }
@@ -71,6 +315,155 @@ void Engine::request_stop(const std::string& reason) {
     std::cout << "[shutdown] " << reason << "\n";
     capture_.close();
   }
+}
+
+void Engine::toggle_taps() {
+  if (taps_) taps_->toggle();
+}
+
+void Engine::request_tap_flush() {
+  if (!taps_) return;
+  tap_flush_req_.store(true, std::memory_order_relaxed);
+}
+
+bool Engine::taps_armed() const { return taps_ && taps_->armed(); }
+
+void Engine::arm_taps() {
+  if (taps_) taps_->arm();
+}
+
+void Engine::disarm_taps() {
+  if (taps_) taps_->disarm();
+}
+
+void Engine::retarget_tap_dir(const std::string& dir) {
+  if (dir.empty()) {
+    std::cerr << "[tap] retarget ignored: empty dir\n";
+    return;
+  }
+  cfg_.tap_dir = dir;
+  if (cfg_.tap_select.empty()) cfg_.tap_select = "raw,mapped,dry,wet";
+  if (!prepared_) {
+    std::cout << "[tap] dir queued until prepare: " << dir << "\n";
+    return;
+  }
+  if (!taps_) {
+    auto sel = TapRecorder::parse_select(cfg_.tap_select);
+    taps_ = std::make_unique<TapRecorder>(dir, sel, cfg_.tap_max_seconds, cfg_.tap_max_mb, cfg_.input_sr,
+                                          cfg_.output_sr, cfg_.input_channels,
+                                          static_cast<int>(selected_.empty() ? 6 : selected_.size()));
+    taps_->disarm();
+    std::cout << "[tap] dir=" << dir << " (cleared, disarmed)\n";
+  } else {
+    taps_->retarget(dir);
+  }
+}
+
+void Engine::handle_control_line(const std::string& line) {
+  // Trim CR/LF and surrounding whitespace.
+  std::string s = line;
+  while (!s.empty() && (s.back() == '\r' || s.back() == '\n' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+  size_t b = s.find_first_not_of(" \t");
+  if (b == std::string::npos) return;
+  s = s.substr(b);
+
+  auto lower = [](std::string t) {
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return t;
+  };
+  std::string head = s;
+  size_t sp = s.find_first_of(" \t");
+  std::string cmd = lower(sp == std::string::npos ? s : s.substr(0, sp));
+  std::string rest = sp == std::string::npos ? std::string() : s.substr(sp + 1);
+  while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) rest.erase(rest.begin());
+
+  if (cmd == "stop") {
+    request_stop("signal:STOP");
+    return;
+  }
+  if (cmd == "tap") {
+    size_t sp2 = rest.find_first_of(" \t");
+    std::string verb = lower(sp2 == std::string::npos ? rest : rest.substr(0, sp2));
+    std::string arg = sp2 == std::string::npos ? std::string() : rest.substr(sp2 + 1);
+    while (!arg.empty() && (arg.front() == ' ' || arg.front() == '\t')) arg.erase(arg.begin());
+    if (verb == "arm") {
+      arm_taps();
+      return;
+    }
+    if (verb == "disarm" || verb == "off") {
+      disarm_taps();
+      return;
+    }
+    if (verb == "flush") {
+      request_tap_flush();
+      return;
+    }
+    if (verb == "toggle") {
+      toggle_taps();
+      return;
+    }
+    if (verb == "dir" || verb == "path") {
+      if (arg.empty()) {
+        std::cerr << "[tap] TAP dir requires a path\n";
+        return;
+      }
+      // Strip optional quotes.
+      if (arg.size() >= 2 && ((arg.front() == '"' && arg.back() == '"') || (arg.front() == '\'' && arg.back() == '\''))) {
+        arg = arg.substr(1, arg.size() - 2);
+      }
+      retarget_tap_dir(arg);
+      return;
+    }
+    std::cerr << "[tap] unknown TAP cmd (want arm|disarm|flush|toggle|dir <path>)\n";
+    return;
+  }
+  std::cerr << "[ctrl] unknown command: " << head << "\n";
+}
+
+void Engine::flush_taps() {
+  if (!taps_) return;
+  taps_->flush();
+}
+
+void Engine::poll_mix_tap_cmds() {
+  if (!mix_ || !taps_) return;
+  switch (mix_->take_tap_cmd()) {
+    case TapUartCmd::On:
+      taps_->arm();
+      break;
+    case TapUartCmd::Off:
+      taps_->disarm();
+      break;
+    case TapUartCmd::Toggle:
+      taps_->toggle();
+      break;
+    case TapUartCmd::Flush:
+      request_tap_flush();
+      break;
+    case TapUartCmd::None:
+    default:
+      break;
+  }
+}
+
+void Engine::maybe_flush_taps() {
+  poll_mix_tap_cmds();
+  if (!tap_flush_req_.exchange(false, std::memory_order_relaxed)) return;
+  try {
+    flush_taps();
+    std::cout << "[tap] flush complete\n";
+  } catch (const std::exception& exc) {
+    std::cerr << "[tap] flush failed: " << exc.what() << "\n";
+  }
+}
+
+void Engine::tap_dry_wet_then_gain(std::vector<float>& mono, const float* dry_or_null) {
+  if (taps_ && taps_->armed() && !mono.empty()) {
+    const int n = static_cast<int>(mono.size());
+    if (taps_->want_dry() && dry_or_null) taps_->append_dry(dry_or_null, n);
+    if (taps_->want_wet()) taps_->append_wet(mono.data(), n);
+  }
+  apply_output_gain_and_limit(mono);
 }
 
 float Engine::current_mix_dry() const { return mix_ ? mix_->dry() : cfg_.mix_dry; }
@@ -177,12 +570,37 @@ void Engine::apply_contract_and_open_model() {
     mix_->start();
   }
   if (cfg_.output_limiter) {
-    out_limiter_.configure({cfg_.limiter_ceiling, cfg_.limiter_release_ms},
+    out_limiter_.configure({cfg_.limiter_ceiling, cfg_.limiter_release_ms, cfg_.limiter_hold_ms},
                            static_cast<std::uint32_t>(std::max(1, cfg_.output_sr)));
+  }
+  if (cfg_.wet_gate_dbfs > -150.f) {
+    ResidualGateConfig gc;
+    gc.threshold_dbfs = cfg_.wet_gate_dbfs;
+    wet_gate_.configure(gc, static_cast<std::uint32_t>(std::max(1, cfg_.output_sr)));
+  }
+  if (!cfg_.tap_dir.empty() && !taps_) {
+    auto sel = TapRecorder::parse_select(cfg_.tap_select);
+    taps_ = std::make_unique<TapRecorder>(cfg_.tap_dir, sel, cfg_.tap_max_seconds, cfg_.tap_max_mb, cfg_.input_sr,
+                                          cfg_.output_sr, cfg_.input_channels, static_cast<int>(selected_.size()));
   }
   if (!infer_) {
     infer_ = make_onnx_inferencer(cfg_.model, cfg_.intra_op_threads, cfg_.inter_op_threads, have_contract_ ? &contract_ : nullptr,
                                   cfg_.bubble_radius);
+  }
+  if (cfg_.ort_warmup_runs > 0) {
+    // First ORT runs allocate arenas / pick kernels and can take 10–100× a
+    // steady hop. Doing that while the DAC already pulls frames is the
+    // cold-start underrun burst. Warm on silence, then zero recurrent state.
+    std::vector<float> zeros(static_cast<size_t>(cfg_.model_num_ch * model_frame_len_), 0.f);
+    double first_ms = 0, last_ms = 0;
+    for (int i = 0; i < cfg_.ort_warmup_runs; ++i) {
+      auto h = infer_->run(zeros.data(), cfg_.model_num_ch, model_frame_len_);
+      if (i == 0) first_ms = h.infer_ms;
+      last_ms = h.infer_ms;
+    }
+    infer_->reset();
+    infer_ema_ms_ = last_ms;
+    std::cout << "[ort] warmed " << cfg_.ort_warmup_runs << " runs (first=" << first_ms << "ms last=" << last_ms << "ms)\n";
   }
   prepared_ = true;
   std::cout << "=== Sound Bubble ONNX Live Pipeline ===\n";
@@ -195,6 +613,11 @@ void Engine::apply_contract_and_open_model() {
             << " limiter=" << (cfg_.output_limiter ? "on" : "off")
             << " ceiling=" << cfg_.limiter_ceiling
             << " release_ms=" << cfg_.limiter_release_ms << "\n";
+  if (!cfg_.mic_gains.empty()) {
+    std::cout << "mic_gains(dev ch, linear)=";
+    for (size_t i = 0; i < cfg_.mic_gains.size(); ++i) std::cout << (i ? "," : "") << cfg_.mic_gains[i];
+    std::cout << "\n";
+  }
 }
 
 void Engine::reset_stream_timeline(bool clear_io_rings, bool clear_model_ring) {
@@ -216,7 +639,11 @@ void Engine::reset_stream_timeline(bool clear_io_rings, bool clear_model_ring) {
 
 void Engine::apply_output_gain_and_limit(std::vector<float>& mono) {
   if (mono.empty()) return;
-  // Order is fixed: output gain first, then peak limiter (ceiling guards DAC).
+  // Residual expander first (pure-wet product path only; taps already captured
+  // pre-gate), then output gain, then peak limiter (ceiling guards DAC).
+  if (wet_gate_.configured() && current_mix_dry() <= 0.f && !wake_) {
+    wet_gate_.process_mono(mono);
+  }
   const float g = dbfs_to_linear(cfg_.output_gain_db);
   if (g != 1.f) {
     for (float& v : mono) v *= g;
@@ -226,6 +653,33 @@ void Engine::apply_output_gain_and_limit(std::vector<float>& mono) {
   } else {
     for (float& v : mono) v = std::clamp(v, -1.f, 1.f);
   }
+}
+
+void Engine::declick_fill_edges(std::vector<float>& y_out, std::vector<std::uint8_t>& fill_mask, int frames) {
+  // Silent fill spliced into a live wet stream is a hard step at both edges;
+  // at block rate that is a buzz. Ramp audio down into each fill run and back
+  // up out of it (fill frames are already zero).
+  if (frames <= 0) return;
+  fill_mask.resize(static_cast<size_t>(frames), 0);
+  const int C = cfg_.output_channels;
+  const int K = kRingDeclickFrames;
+  auto scale = [&](int t, float g) {
+    for (int c = 0; c < C; ++c) y_out[static_cast<size_t>(t * C + c)] *= g;
+  };
+  // Edge against what is already queued in the ring.
+  if (fill_mask[0] && !last_write_was_fill_) output_ring_->fade_tail(K);
+  for (int t = 0; t < frames; ++t) {
+    const bool prev_fill = (t == 0) ? last_write_was_fill_ : fill_mask[static_cast<size_t>(t - 1)] != 0;
+    const bool cur_fill = fill_mask[static_cast<size_t>(t)] != 0;
+    if (prev_fill && !cur_fill) {  // fill -> audio: fade in
+      for (int j = 0; j < K && t + j < frames && !fill_mask[static_cast<size_t>(t + j)]; ++j)
+        scale(t + j, static_cast<float>(j + 1) / static_cast<float>(K + 1));
+    } else if (!prev_fill && cur_fill && t > 0) {  // audio -> fill: fade out
+      for (int j = 0; j < K && t - 1 - j >= 0 && !fill_mask[static_cast<size_t>(t - 1 - j)]; ++j)
+        scale(t - 1 - j, static_cast<float>(j) / static_cast<float>(K));
+    }
+  }
+  last_write_was_fill_ = fill_mask.back() != 0;
 }
 
 std::vector<float> Engine::mix_wet_with_dry(const std::vector<float>& wet, const float* live_dry_or_null, int n) {
@@ -258,10 +712,16 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
   double capture_age_ms = (t0 - item.t_capture) * 1000.0;
   int capture_gap = 0;
   if (last_capture_idx_) capture_gap = static_cast<int>(std::max<std::int64_t>(0, static_cast<std::int64_t>(item.capture_idx - *last_capture_idx_ - 1)));
+  // Latest-wins (adaptive/latest) routinely drains 1–2 older capture blocks when the
+  // worker trails the PortAudio callback — especially Windows two-stream WDM-KS.
+  // Treating every mild drain as a hard discontinuity forced permanent shed +
+  // reset_stream_timeline every block, which zeroed wet / model_out.
+  // Hard discontinuity = stale capture, or more than a mild skip (true loss).
+  constexpr int kMildSkipMax = 2;
+  const int skipped_hint = std::max(std::max(0, drained), std::max(0, capture_gap));
   bool disc = false;
-  if (drained > 0) disc = true;
-  if (capture_gap > 0) disc = true;
   if (cfg_.queue_policy == "adaptive" && capture_age_ms > cfg_.max_capture_age_ms) disc = true;
+  if (skipped_hint > kMildSkipMax) disc = true;
   last_capture_age_ms_ = capture_age_ms;
   last_capture_gap_ = capture_gap;
   last_capture_drained_ = drained;
@@ -301,6 +761,12 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
   std::vector<float> planar(static_cast<size_t>(C * T), 0.f);
   for (int c = 0; c < C; ++c)
     for (int t = 0; t < T; ++t) planar[static_cast<size_t>(c * T + t)] = item.interleaved[static_cast<size_t>(t * C + c)];
+  // Per-mic calibration trims by device channel (raw tap above reads item.interleaved, untrimmed).
+  for (int c = 0; c < C && c < static_cast<int>(cfg_.mic_gains.size()); ++c) {
+    const float g = cfg_.mic_gains[static_cast<size_t>(c)];
+    if (g == 1.f) continue;
+    for (int t = 0; t < T; ++t) planar[static_cast<size_t>(c * T + t)] *= g;
+  }
   std::vector<float> xref(static_cast<size_t>(T));
   for (int t = 0; t < T; ++t) xref[static_cast<size_t>(t)] = planar[static_cast<size_t>(cfg_.monitor_input_channel * T + t)];
   std::vector<float> selected(static_cast<size_t>(selected_.size() * T));
@@ -308,6 +774,10 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
     int c = selected_[i];
     std::copy(planar.begin() + static_cast<size_t>(c * T), planar.begin() + static_cast<size_t>((c + 1) * T),
               selected.begin() + static_cast<size_t>(i * T));
+  }
+  if (taps_ && taps_->armed()) {
+    if (taps_->want_raw()) taps_->append_raw_interleaved(item.interleaved.data(), T, C);
+    if (taps_->want_mapped()) taps_->append_mapped_planar(selected.data(), static_cast<int>(selected_.size()), T);
   }
   auto fitted = fit_channels(selected.data(), static_cast<int>(selected_.size()), T, cfg_.model_num_ch);
   double t_dc = now_sec();
@@ -347,9 +817,9 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
   auto before = model_ring_->stats.dropped_samples;
   if (model_frames > 0) model_ring_->push(x_model.data(), cfg_.model_num_ch, model_frames);
   if (model_ring_->stats.dropped_samples > before) {
+    // Push already drop-oldest. Do NOT reset infer/resamplers — that zeros
+    // recurrent state mid-phrase and is the wet-path pop/buzz when keep opens.
     model_ring_drops_ += 1;
-    reset_stream_timeline(true, true);
-    model_ring_resets_ += 1;
   }
 
   double infer_start = now_sec();
@@ -385,30 +855,43 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
   int missing = std::max(0, cfg_.hops_per_io - steps_run);
   int frames_per_hop_out = static_cast<int>(std::llround(static_cast<double>(cfg_.output_sr) * (static_cast<double>(cfg_.model_chunk) / cfg_.model_sr)));
   std::vector<float> y_out;
+  // 1 = silent fill frame (missing hop / pad / catch-up lead), 0 = audio.
+  std::vector<std::uint8_t> fill_mask;
   bool pending_reset = disc;
   if (!y_chunks.empty()) {
     model_out_db_ = 0.8 * model_out_db_ + 0.2 * static_cast<double>(rms_dbfs(y_chunks.data(), static_cast<int>(y_chunks.size())));
     auto y_io = out_src_->process(y_chunks.data(), static_cast<int>(y_chunks.size()));
-    auto mixed = mix_wet_with_dry(y_io, nullptr, static_cast<int>(y_io.size()));
-    apply_output_gain_and_limit(mixed);
+    const int n_out = static_cast<int>(y_io.size());
+    // Read dry once so mix and dry_ref tap share the same reference (pre-output_gain).
+    auto dry_live = dry_->read_block(n_out);
+    auto mixed = mix_wet_with_dry(y_io, dry_live.data(), n_out);
+    tap_dry_wet_then_gain(mixed, dry_live.data());
     output_db_ = 0.8 * output_db_ + 0.2 * static_cast<double>(rms_dbfs(mixed.data(), static_cast<int>(mixed.size())));
     y_out = to_multichannel(mixed.data(), static_cast<int>(mixed.size()), cfg_.output_channels);
+    fill_mask.assign(static_cast<size_t>(mixed.size()), 0);
   }
   auto policy = parse_overload_policy(cfg_.overload_policy);
+  // Product path (mix_dry=0): never splice dry into the wet DAC stream on
+  // missing hops — that alternates dry/wet at block rate and buzzes when keep opens.
+  const bool splice_dry = (policy == OverloadPolicy::DryFill) && (cfg_.mix_dry > 0.f || wake_ != nullptr);
   if (missing > 0 && policy != OverloadPolicy::Strict) {
     int missing_frames = missing * frames_per_hop_out;
     std::vector<float> fill;
-    if (policy == OverloadPolicy::DryFill) {
+    if (splice_dry) {
       auto dry_fill = dry_->read_block(missing_frames);
       auto mixed = mix_wet_with_dry(std::vector<float>(static_cast<size_t>(missing_frames), 0.f), dry_fill.data(), missing_frames);
       if (!wake_) mixed = dry_fill;
-      apply_output_gain_and_limit(mixed);
+      tap_dry_wet_then_gain(mixed, dry_fill.data());
       fill = to_multichannel(mixed.data(), missing_frames, cfg_.output_channels);
     } else {
+      // Keep tap clocks moving with silence on wet; still consume dry for alignment.
+      auto dry_fill = dry_->read_block(missing_frames);
+      std::vector<float> silent(static_cast<size_t>(missing_frames), 0.f);
+      tap_dry_wet_then_gain(silent, dry_fill.data());
       fill.assign(static_cast<size_t>(missing_frames * cfg_.output_channels), 0.f);
     }
     y_out.insert(y_out.end(), fill.begin(), fill.end());
-    pending_reset = true;
+    fill_mask.insert(fill_mask.end(), static_cast<size_t>(missing_frames), splice_dry ? 0 : 1);
   }
   if (policy != OverloadPolicy::Strict) {
     auto fit_exact = [&](std::vector<float>& y, int frames_needed) {
@@ -420,16 +903,22 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
       if (ncopy > 0) {
         std::copy(y.begin(), y.begin() + static_cast<size_t>(ncopy * cfg_.output_channels), fixed.begin());
       }
-      if (have < frames_needed && policy == OverloadPolicy::DryFill) {
+      if (have < frames_needed) {
         int gap = frames_needed - have;
         auto dry_gap = dry_->read_block(gap);
-        apply_output_gain_and_limit(dry_gap);
-        auto fill = to_multichannel(dry_gap.data(), gap, cfg_.output_channels);
-        std::copy(fill.begin(), fill.end(), fixed.begin() + static_cast<size_t>(have * cfg_.output_channels));
+        if (splice_dry) {
+          tap_dry_wet_then_gain(dry_gap, dry_gap.data());
+          auto fill = to_multichannel(dry_gap.data(), gap, cfg_.output_channels);
+          std::copy(fill.begin(), fill.end(), fixed.begin() + static_cast<size_t>(have * cfg_.output_channels));
+        } else {
+          std::vector<float> silent(static_cast<size_t>(gap), 0.f);
+          tap_dry_wet_then_gain(silent, dry_gap.data());
+        }
       }
       y.swap(fixed);
     };
     fit_exact(y_out, output_block_);
+    fill_mask.resize(static_cast<size_t>(output_block_), splice_dry ? 0 : 1);
     // Each skipped capture index already advanced the output clock: queue drops
     // show up as capture_gap, and pop_latest collapses show up as drained.
     // Write one output block per skipped index so those periods are not holes.
@@ -439,18 +928,23 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
     if (catchup > 0) {
       int extra = catchup * output_block_;
       std::vector<float> lead;
-      if (policy == OverloadPolicy::DryFill) {
+      if (splice_dry) {
         auto dry_lead = dry_->read_block(extra);
-        apply_output_gain_and_limit(dry_lead);
+        tap_dry_wet_then_gain(dry_lead, dry_lead.data());
         lead = to_multichannel(dry_lead.data(), extra, cfg_.output_channels);
       } else {
+        auto dry_lead = dry_->read_block(extra);
+        std::vector<float> silent(static_cast<size_t>(extra), 0.f);
+        tap_dry_wet_then_gain(silent, dry_lead.data());
         lead.assign(static_cast<size_t>(extra * cfg_.output_channels), 0.f);
       }
       y_out.insert(y_out.begin(), lead.begin(), lead.end());
+      fill_mask.insert(fill_mask.begin(), static_cast<size_t>(extra), splice_dry ? 0 : 1);
     }
   }
   if (!y_out.empty()) {
     int frames = static_cast<int>(y_out.size()) / cfg_.output_channels;
+    declick_fill_edges(y_out, fill_mask, frames);
     int dropped = output_ring_->write_drop_oldest(y_out.data(), frames);
     out_dropped_ += static_cast<std::uint64_t>(std::max(0, dropped));
     int ahead = output_ring_->ahead_frames();
@@ -459,7 +953,8 @@ bool Engine::handle_item(const CaptureItem& item, int drained) {
     int target = static_cast<int>(decision.effective_target_ahead_ms * cfg_.output_sr / 1000.0);
     int slack = std::max(1, output_block_ / 4);
     int trim_threshold = std::min(ring_params_.ring_max_ahead_frames, target + slack);
-    if (ahead > trim_threshold) {
+    // Never trim while recovering from underruns — that fights the cushion.
+    if (recent_underruns == 0 && ahead > trim_threshold) {
       int trim = ahead - target;
       int d2 = output_ring_->drop_oldest_frames(trim);
       if (d2 > 0) {
@@ -638,6 +1133,7 @@ int Engine::run_offline_wav() {
     item.t_capture = now_sec();
     item.capture_idx = idx++;
     handle_item(item, 0);
+    maybe_flush_taps();
     int ahead = output_ring_->ahead_frames();
     if (ahead > 0) {
       std::vector<float> block(static_cast<size_t>(ahead * cfg_.output_channels));
@@ -646,6 +1142,7 @@ int Engine::run_offline_wav() {
     }
   }
   if (!cfg_.output_wav.empty()) write_wav(cfg_.output_wav, cfg_.output_sr, cfg_.output_channels, rendered);
+  flush_taps();
   return 0;
 }
 
@@ -712,6 +1209,7 @@ int Engine::run_live() {
           request_stop("stream inactive");
           break;
         }
+        maybe_flush_taps();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
       session.stop();
@@ -800,6 +1298,7 @@ int Engine::run_live() {
           request_stop("stream inactive");
           break;
         }
+        maybe_flush_taps();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
       session.stop();
@@ -812,6 +1311,12 @@ int Engine::run_live() {
 
   if (worker_.joinable()) worker_.join();
   if (wake_) wake_->stop();
+  try {
+    flush_taps();
+  } catch (const std::exception& exc) {
+    std::cerr << "[tap] flush failed: " << exc.what() << "\n";
+    exit_code_ = 1;
+  }
   if (worker_failed_.load()) {
     std::lock_guard<std::mutex> lock(err_mu_);
     std::cerr << "[worker-error] " << worker_error_ << "\n";
@@ -825,7 +1330,12 @@ void print_usage() {
                "  Live flags match edge/inference_pipeline.py. Add --preflight to check devices and exit.\n"
                "  --duplex-mode off|worker|callback   (default off; Rapid uses worker)\n"
                "  --duplex-block FRAMES               (0=auto; callback forces input_block)\n"
-               "  --mix-uart-port PORT applies MIX wet/dry lines from the USB knob.\n";
+               "  --mix-uart-port PORT applies MIX wet/dry lines from the USB knob.\n"
+               "  --tap-dir PATH                     write raw_8ch/mapped_6ch/dry_ref/wet_out WAVs (off by default)\n"
+               "  --tap-select raw,mapped,dry,wet    (default raw,mapped,dry,wet; wet_out is pre-output_gain)\n"
+               "  --tap-max-seconds N                (default 120; 0=unlimited)\n"
+               "  --tap-max-mb M                     (default 1024; 0=unlimited)\n"
+               "  Linux: SIGUSR1 toggles taps; SIGUSR2 flushes *.wav.partial -> *.wav\n";
 }
 
 PipelineConfig parse_args(int argc, char** argv) {
@@ -878,6 +1388,25 @@ PipelineConfig parse_args(int argc, char** argv) {
       cfg.limiter_ceiling = v;
     }
     else if (a == "--limiter-release-ms") cfg.limiter_release_ms = std::stof(need(a.c_str()));
+    else if (a == "--limiter-hold-ms") cfg.limiter_hold_ms = std::stof(need(a.c_str()));
+    else if (a == "--mic-gains" || a == "--mic-gains-db") {
+      const bool db = (a == "--mic-gains-db");
+      cfg.mic_gains.clear();
+      std::stringstream ss(need(a.c_str()));
+      std::string tok;
+      while (std::getline(ss, tok, ',')) {
+        if (tok.empty()) continue;
+        float v = std::stof(tok);
+        if (db) v = dbfs_to_linear(v);
+        if (!(v > 0.f) || !std::isfinite(v)) throw std::runtime_error("--mic-gains values must be finite and > 0");
+        cfg.mic_gains.push_back(v);
+      }
+    }
+    else if (a == "--wet-gate-dbfs") {
+      std::string v = need(a.c_str());
+      cfg.wet_gate_dbfs = (v == "off") ? -200.f : std::stof(v);
+    }
+    else if (a == "--ort-warmup-runs") cfg.ort_warmup_runs = std::stoi(need(a.c_str()));
     else if (a == "--output-gain") {
       throw std::runtime_error("--output-gain (linear) was removed; use --output-gain-db (0 = unity)");
     }
@@ -912,7 +1441,15 @@ PipelineConfig parse_args(int argc, char** argv) {
     else if (a == "--mix-uart-baud") cfg.mix_uart_baud = std::stoi(need(a.c_str()));
     else if (a == "--input-wav") cfg.input_wav = need(a.c_str());
     else if (a == "--output-wav") cfg.output_wav = need(a.c_str());
+    else if (a == "--tap-dir") cfg.tap_dir = need(a.c_str());
+    else if (a == "--tap-select") cfg.tap_select = need(a.c_str());
+    else if (a == "--tap-max-seconds") cfg.tap_max_seconds = std::stod(need(a.c_str()));
+    else if (a == "--tap-max-mb") cfg.tap_max_mb = std::stod(need(a.c_str()));
     else throw std::runtime_error("unknown argument " + a);
+  }
+  if (!cfg.tap_dir.empty()) {
+    // Validate select early so bad tokens fail before audio/model open.
+    (void)TapRecorder::parse_select(cfg.tap_select);
   }
   return cfg;
 }

@@ -120,28 +120,46 @@ struct OutputRingStats {
   std::uint64_t read_calls = 0;
 };
 
+// Declick length for ring discontinuities (underrun fade, resume fade-in,
+// trim/overflow splice crossfade). 48 frames = 2 ms @ 24 kHz.
+inline constexpr int kRingDeclickFrames = 48;
+// Splices shorter than this are applied hard (tiny test rings / degenerate cases).
+inline constexpr int kRingMinCrossfadeFrames = 8;
+
 class OutputRingBuffer {
  public:
-  OutputRingBuffer(int num_channels, int capacity_frames);
+  OutputRingBuffer(int num_channels, int capacity_frames, int declick_frames = kRingDeclickFrames);
   int capacity_frames() const { return capacity_; }
   int ahead_frames() const;
   int free_frames() const;
   void clear();
+  // Drop the oldest n frames; the splice is crossfaded (no hard jump).
   int drop_oldest_frames(int n);
   int write_drop_oldest(const float* interleaved, int frames);
   int write_silence(int frames);
+  // Fade the newest unread frames to zero (call before appending a silent gap
+  // after audio so the gap does not start with a step).
+  void fade_tail(int frames);
+  // Underrun: decays the last delivered frame to zero over declick_frames
+  // (never a DC hold), then fades the next real audio back in.
   int read_into(float* interleaved, int frames);
   std::uint64_t underrun_frames() const;
 
   OutputRingStats stats;
 
  private:
+  void crossfade_splice_locked(int old_read, int dropped);
+
   int channels_;
   int capacity_;
+  int declick_;
   int read_ = 0;
   int write_ = 0;
   int size_ = 0;
   std::vector<float> buf_;
+  std::vector<float> last_frame_;  // last pre-gap frame (decays during underrun)
+  float hold_gain_ = 0.f;          // residual weight of last_frame_ (1 → 0)
+  int fade_in_pos_ = 0;            // < declick_ while fading audio back in
   mutable std::mutex mu_;
 };
 

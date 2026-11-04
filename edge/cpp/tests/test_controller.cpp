@@ -160,3 +160,47 @@ TEST(ControllerConfig, RejectsPathOutsideEdge) {
   cfg.contract_path.reset();
   EXPECT_THROW(soundbubble::validate_controller_config(cfg, repo.string()), std::invalid_argument);
 }
+
+TEST(ControllerConfig, TapDirArgvForCppAndPython) {
+  auto repo = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  auto model = repo / "edge" / "model.onnx";
+  auto contract = repo / "edge" / "model.runtime.json";
+  if (!std::filesystem::exists(model) || !std::filesystem::exists(contract)) GTEST_SKIP() << "model artifacts missing";
+
+  auto measure = std::filesystem::temp_directory_path() / "sb_ctl_tap_measure";
+  std::filesystem::remove_all(measure);
+  std::filesystem::create_directories(measure);
+#if defined(_WIN32)
+  _putenv_s("SOUNDBUBBLE_MEASURE_DIR", measure.string().c_str());
+#else
+  setenv("SOUNDBUBBLE_MEASURE_DIR", measure.string().c_str(), 1);
+#endif
+
+  soundbubble::ControllerConfig cfg;
+  cfg.model = model.generic_string();
+  cfg.contract_path = contract.generic_string();
+  cfg.runtime = "cpp";
+  cfg.tap_dir = "measure/dashboard_live";
+  cfg.tap_select = "mapped,dry";
+  cfg.tap_max_seconds = 30;
+  cfg.tap_max_mb = 128;
+  auto argv = soundbubble::build_pipeline_argv(cfg, repo.string(), "soundbubble-rt");
+  auto tap_it = std::find(argv.begin(), argv.end(), "--tap-dir");
+  ASSERT_NE(tap_it, argv.end());
+  ASSERT_NE(tap_it + 1, argv.end());
+  EXPECT_NE((tap_it + 1)->find("dashboard_live"), std::string::npos);
+  EXPECT_NE((tap_it + 1)->find(measure.filename().string()), std::string::npos);
+  EXPECT_NE(std::find(argv.begin(), argv.end(), "--tap-select"), argv.end());
+  EXPECT_NE(std::find(argv.begin(), argv.end(), "mapped,dry"), argv.end());
+
+  cfg.runtime = "python";
+  auto py = soundbubble::build_pipeline_argv(cfg, repo.string(), "soundbubble-rt");
+  EXPECT_NE(std::find(py.begin(), py.end(), "--tap-dir"), py.end());
+
+  cfg.tap_dir = "/tmp/outside-measure";
+  EXPECT_THROW(soundbubble::validate_controller_config(cfg, repo.string()), std::invalid_argument);
+
+  cfg.tap_dir.clear();
+  auto off = soundbubble::build_pipeline_argv(cfg, repo.string(), "soundbubble-rt");
+  EXPECT_EQ(std::find(off.begin(), off.end(), "--tap-dir"), off.end());
+}

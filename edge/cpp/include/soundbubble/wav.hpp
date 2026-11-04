@@ -13,5 +13,7 @@ struct WavData {
 
 WavData read_wav(const std::string& path);
 void write_wav(const std::string& path, int sample_rate, int channels, const std::vector<float>& interleaved);
+// Write to path+".partial" then rename so readers never see a half-written file.
+void write_wav_atomic(const std::string& path, int sample_rate, int channels, const std::vector<float>& interleaved);
 
 }  // namespace soundbubble

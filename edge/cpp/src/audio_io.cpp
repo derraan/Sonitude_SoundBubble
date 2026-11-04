@@ -1,8 +1,11 @@
 #include "soundbubble/audio_io.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
+#include <thread>
 
 #if defined(SOUNDBUBBLE_HAS_PORTAUDIO)
 #include <portaudio.h>
@@ -22,6 +25,43 @@ struct PaInit {
 PaInit& pa_init() {
   static PaInit init;
   return init;
+}
+
+std::string device_label(PaDeviceIndex idx) {
+  const PaDeviceInfo* info = Pa_GetDeviceInfo(idx);
+  if (!info) return "idx=" + std::to_string(static_cast<int>(idx)) + " (null info)";
+  const PaHostApiInfo* host = Pa_GetHostApiInfo(info->hostApi);
+  std::ostringstream oss;
+  oss << "idx=" << static_cast<int>(idx) << " '" << (info->name ? info->name : "") << "'"
+      << " host=" << (host && host->name ? host->name : "?")
+      << " default_sr=" << info->defaultSampleRate
+      << " in_ch=" << info->maxInputChannels << " out_ch=" << info->maxOutputChannels;
+  return oss.str();
+}
+
+std::string open_err(const char* side, PaError err, PaDeviceIndex idx, int sr, int ch, int frames) {
+  std::ostringstream oss;
+  oss << side << " open failed: " << Pa_GetErrorText(err)
+      << " | " << device_label(idx)
+      << " | requested_sr=" << sr << " ch=" << ch << " framesPerBuffer=" << frames;
+  if (err == paInvalidDevice || err == paInvalidSampleRate) {
+    oss << " | hint: unsupported sample rate on this host API often surfaces as '"
+        << Pa_GetErrorText(err) << "' — Pico INMP441 WDM-KS is 24000 Hz only";
+  }
+  if (err == paDeviceUnavailable) {
+    oss << " | hint: device exclusively opened by another process";
+  }
+  return oss.str();
+}
+
+PaError open_with_retry(PaStream** stream, PaStreamParameters* in, PaStreamParameters* out, double sr,
+                        unsigned long frames, PaStreamCallback cb, void* user) {
+  PaError err = Pa_OpenStream(stream, in, out, sr, frames, paNoFlag, cb, user);
+  if (err == paInvalidDevice || err == paDeviceUnavailable) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    err = Pa_OpenStream(stream, in, out, sr, frames, paNoFlag, cb, user);
+  }
+  return err;
 }
 }  // namespace
 #endif
@@ -73,9 +113,15 @@ void preflight_devices(const AudioFormat& input, const AudioFormat& output) {
   out.sampleFormat = paFloat32;
   out.suggestedLatency = Pa_GetDeviceInfo(out.device) ? Pa_GetDeviceInfo(out.device)->defaultLowOutputLatency : 0.02;
   PaError err = Pa_IsFormatSupported(&in, nullptr, input.sample_rate);
-  if (err != paFormatIsSupported) throw std::runtime_error(std::string("input format: ") + Pa_GetErrorText(err));
+  if (err != paFormatIsSupported) {
+    throw std::runtime_error(std::string("input format: ") + Pa_GetErrorText(err) + " | " + device_label(in.device) +
+                             " | requested_sr=" + std::to_string(input.sample_rate));
+  }
   err = Pa_IsFormatSupported(nullptr, &out, output.sample_rate);
-  if (err != paFormatIsSupported) throw std::runtime_error(std::string("output format: ") + Pa_GetErrorText(err));
+  if (err != paFormatIsSupported) {
+    throw std::runtime_error(std::string("output format: ") + Pa_GetErrorText(err) + " | " + device_label(out.device) +
+                             " | requested_sr=" + std::to_string(output.sample_rate));
+  }
 #else
   (void)input;
   (void)output;
@@ -165,10 +211,20 @@ DuplexSession::DuplexSession(AudioFormat input, AudioFormat output, int input_bl
                            : 0.02;
   double out_from_block = std::max(0.004, 2.0 * static_cast<double>(std::max(1, output_block)) / static_cast<double>(output.sample_rate));
   out.suggestedLatency = latency == "high" ? out_default : std::min(out_default, out_from_block);
-  PaError err = Pa_OpenStream(&impl_->input, &in, nullptr, input.sample_rate, static_cast<unsigned long>(input_block), paNoFlag, &Impl::in_thunk, impl_.get());
-  if (err != paNoError) throw std::runtime_error(Pa_GetErrorText(err));
-  err = Pa_OpenStream(&impl_->output, nullptr, &out, output.sample_rate, static_cast<unsigned long>(output_block), paNoFlag, &Impl::out_thunk, impl_.get());
-  if (err != paNoError) throw std::runtime_error(Pa_GetErrorText(err));
+  PaError err = open_with_retry(&impl_->input, &in, nullptr, input.sample_rate,
+                                static_cast<unsigned long>(input_block), &Impl::in_thunk, impl_.get());
+  if (err != paNoError) {
+    throw std::runtime_error(open_err("input", err, in.device, input.sample_rate, input.channels, input_block));
+  }
+  err = open_with_retry(&impl_->output, nullptr, &out, output.sample_rate,
+                        static_cast<unsigned long>(output_block), &Impl::out_thunk, impl_.get());
+  if (err != paNoError) {
+    if (impl_->input) {
+      Pa_CloseStream(impl_->input);
+      impl_->input = nullptr;
+    }
+    throw std::runtime_error(open_err("output", err, out.device, output.sample_rate, output.channels, output_block));
+  }
 #else
   (void)input;
   (void)output;
@@ -187,9 +243,13 @@ DuplexSession::~DuplexSession() { stop(); }
 void DuplexSession::start() {
 #if defined(SOUNDBUBBLE_HAS_PORTAUDIO)
   PaError err = Pa_StartStream(impl_->output);
-  if (err != paNoError) throw std::runtime_error(Pa_GetErrorText(err));
+  if (err != paNoError) {
+    throw std::runtime_error(std::string("output start failed: ") + Pa_GetErrorText(err));
+  }
   err = Pa_StartStream(impl_->input);
-  if (err != paNoError) throw std::runtime_error(Pa_GetErrorText(err));
+  if (err != paNoError) {
+    throw std::runtime_error(std::string("input start failed: ") + Pa_GetErrorText(err));
+  }
 #endif
 }
 
