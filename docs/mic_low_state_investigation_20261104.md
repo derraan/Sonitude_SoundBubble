@@ -1,5 +1,7 @@
 # Pico mic array: "low-state" channels — investigation and level calibration
 
+> **Recorded data (raw WAVs + per-take results):** Google Drive, mirroring `measure/`: https://drive.google.com/drive/folders/1gF2gqEybPuUn5eR00L4myzW5VXbS391c?usp=sharing. Index and sha256 manifest: [docs/data/MEASURE_DATA_20261104.md](data/MEASURE_DATA_20261104.md).
+
 **Date:** 2026-11-04
 **Hardware:** Pico 2 W `INMP441 8ch + DAC 2ch 32b` (6 INMP441 MEMS mics, firmware `pico2w-audio-8in2out`), Windows testbench, stimulus out QUAD-CAPTURE 1-2 (left), HATS rig
 **Data:** `measure/mic_state_20261104/` · **Figures:** `docs/img/mic_low_state_20261104/`

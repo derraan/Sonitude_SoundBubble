@@ -1,5 +1,7 @@
 # Polar azimuth + elevation sweeps @ 1 m (EP35) and the recurrent-state observation
 
+> **Recorded data (raw WAVs + per-take results):** Google Drive, mirroring `measure/`: https://drive.google.com/drive/folders/1gF2gqEybPuUn5eR00L4myzW5VXbS391c?usp=sharing. Index and sha256 manifest: [docs/data/MEASURE_DATA_20261104.md](data/MEASURE_DATA_20261104.md).
+
 **Date:** 2026-11-04
 **Status:** **VALID / PROTECTED.** Raw sweeps, trial data and analysis must not be deleted, moved or overwritten. See [Protected data](#protected-data).
 **Run:** `measure/run_20261104_040645_1abaf4`

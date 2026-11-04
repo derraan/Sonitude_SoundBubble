@@ -1,5 +1,7 @@
 # Speech (in_context_speech) algorithm takes — EP35 on the bench
 
+> **Recorded data (raw WAVs + per-take results):** Google Drive, mirroring `measure/`: https://drive.google.com/drive/folders/1gF2gqEybPuUn5eR00L4myzW5VXbS391c?usp=sharing. Index and sha256 manifest: [docs/data/MEASURE_DATA_20261104.md](data/MEASURE_DATA_20261104.md).
+
 **Date:** 2026-11-04 (07:31–07:45 UTC)
 **Run:** `measure/run_20261104_073046_3447eb` (Algorithm tab, campaign `in_context_speech`)
 **Results/figures:** `measure/run_20261104_073046_3447eb/analysis/speech_eval_20261104/` · `docs/img/speech_ep35_20261104/`

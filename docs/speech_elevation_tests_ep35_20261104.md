@@ -1,5 +1,7 @@
 # Speech × elevation × distance test — EP35 (run_20261104_075009_b48fe6)
 
+> **Recorded data (raw WAVs + per-take results):** Google Drive, mirroring `measure/`: https://drive.google.com/drive/folders/1gF2gqEybPuUn5eR00L4myzW5VXbS391c?usp=sharing. Index and sha256 manifest: [docs/data/MEASURE_DATA_20261104.md](data/MEASURE_DATA_20261104.md).
+
 **Date:** 2026-11-04, 07:50–08:02 UTC
 **Run:** `measure/run_20261104_075009_b48fe6` (Algorithm tab, `in_context_speech`)
 **Analysis:** `measure/run_20261104_075009_b48fe6/analysis/speech_elev_eval_20261104/` · figures in `docs/img/speech_elev_ep35_20261104/`
