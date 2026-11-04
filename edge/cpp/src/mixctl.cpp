@@ -119,7 +119,9 @@ void MixControl::consume(std::string_view chunk) {
   pending_.append(chunk.data(), chunk.size());
   size_t nl;
   while ((nl = pending_.find('\n')) != std::string::npos) {
-    std::string_view line = pending_.substr(0, nl);
+    // Own the line: substr() returns a temporary, so a string_view of it dangles
+    // (ASan heap-use-after-free in parse_mix_line).
+    const std::string line = pending_.substr(0, nl);
     pending_.erase(0, nl + 1);
     auto parsed = parse_mix_line(line);
     if (parsed.ok) {
