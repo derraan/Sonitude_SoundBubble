@@ -207,11 +207,24 @@ TEST(ControllerConfig, TapDirArgvForCppAndPython) {
   EXPECT_EQ(std::find(off.begin(), off.end(), "--tap-dir"), off.end());
 }
 
+
+namespace {
+// Self-contained repo layout for controller tests: validation only needs the model and
+// contract files to exist under <repo>/edge, so CI does not need real ONNX artifacts.
+std::filesystem::path make_fake_repo(const std::string& tag) {
+  auto root = std::filesystem::temp_directory_path() / ("sb_ctl_" + tag + "_" + std::to_string(std::rand()));
+  std::filesystem::create_directories(root / "edge");
+  std::filesystem::create_directories(root / "measure");
+  std::ofstream(root / "edge" / "model.onnx") << "fake";
+  std::ofstream(root / "edge" / "model.runtime.json") << "{}";
+  return root;
+}
+}  // namespace
+
 TEST(ControllerConfig, MicGainsArgvCppOnlyAndValidated) {
-  auto repo = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  auto repo = make_fake_repo("micgains");
   auto model = repo / "edge" / "model.onnx";
   auto contract = repo / "edge" / "model.runtime.json";
-  if (!std::filesystem::exists(model) || !std::filesystem::exists(contract)) GTEST_SKIP() << "model artifacts missing";
   std::string base = std::string("{\"model\":\"") + model.generic_string() + "\",\"contract_path\":\"" + contract.generic_string() +
                      "\",\"runtime\":\"cpp\",\"mic_gains\":";
   auto cfg = soundbubble::controller_config_from_json(base + "\"1.514,1.514,6.457,1.514,1.514,6.683\"}");
@@ -231,18 +244,17 @@ TEST(ControllerConfig, MicGainsArgvCppOnlyAndValidated) {
   auto off = soundbubble::controller_config_from_json(base + "\"\"}");
   auto argv_off = soundbubble::build_pipeline_argv(off, repo.string(), "soundbubble-rt");
   EXPECT_EQ(std::find(argv_off.begin(), argv_off.end(), "--mic-gains"), argv_off.end());
+  std::filesystem::remove_all(repo);
 }
 
 #if !defined(_WIN32)
 #include <unistd.h>
 TEST(ControllerSession, DatasetRecordingWritesSessionLogAndTelemetry) {
-  auto repo = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  if (std::system("systemctl is-active --quiet sonitude-soundbubble 2>/dev/null") == 0) GTEST_SKIP() << "production unit active";
+  auto tmp = make_fake_repo("session_" + std::to_string(::getpid()));
+  auto repo = tmp;
   auto model = repo / "edge" / "model.onnx";
   auto contract = repo / "edge" / "model.runtime.json";
-  if (!std::filesystem::exists(model) || !std::filesystem::exists(contract)) GTEST_SKIP() << "model artifacts missing";
-  if (std::system("systemctl is-active --quiet sonitude-soundbubble 2>/dev/null") == 0) GTEST_SKIP() << "production unit active";
-  auto tmp = std::filesystem::temp_directory_path() / ("sb_session_test_" + std::to_string(::getpid()));
-  std::filesystem::create_directories(tmp / "measure");
   auto fake = tmp / "fake-rt.sh";
   {
     std::ofstream f(fake);
