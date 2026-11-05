@@ -1,0 +1,15 @@
+{
+  "name": "soundbubble-rt",
+  "version-string": "0.1.0",
+  "description": "Sonitude Sound Bubble native realtime runtime",
+  "dependencies": [
+    "portaudio",
+    "soxr",
+    "cli11",
+    "nlohmann-json",
+    "cpp-httplib",
+    "spdlog",
+    "sentencepiece",
+    "gtest"
+  ]
+}
