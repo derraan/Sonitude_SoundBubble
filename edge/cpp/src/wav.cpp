@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
@@ -108,6 +109,22 @@ void write_wav(const std::string& path, int sample_rate, int channels, const std
   out.write("data", 4);
   write_u32(out, data_bytes);
   out.write(reinterpret_cast<const char*>(interleaved.data()), data_bytes);
+}
+
+void write_wav_atomic(const std::string& path, int sample_rate, int channels, const std::vector<float>& interleaved) {
+  namespace fs = std::filesystem;
+  const fs::path dest(path);
+  const fs::path partial = dest.string() + ".partial";
+  write_wav(partial.string(), sample_rate, channels, interleaved);
+  std::error_code ec;
+  fs::remove(dest, ec);
+  fs::rename(partial, dest, ec);
+  if (ec) {
+    // Fallback: copy then remove partial if rename fails (e.g. cross-device).
+    fs::copy_file(partial, dest, fs::copy_options::overwrite_existing, ec);
+    fs::remove(partial, ec);
+    if (!fs::exists(dest)) throw std::runtime_error("atomic wav rename failed for " + path);
+  }
 }
 
 }  // namespace soundbubble

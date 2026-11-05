@@ -21,7 +21,7 @@ struct ControllerConfig {
   std::optional<int> output_device;
   int input_channels = 8;
   int output_channels = 2;
-  std::string channel_map = "0,1,2,3,4,5";
+  std::string channel_map = "5,4,3,2,1,0";  // MIC_INDEX_CANON.md §4
   int monitor_input_channel = 0;
   int input_sr = 24000;
   int model_sr = 24000;
@@ -74,6 +74,12 @@ struct ControllerConfig {
   std::string mix_uart_port;
   int mix_uart_baud = 115200;
   std::string runtime = "cpp";
+  // Live WAV taps (raw/mapped/dry/wet). Empty tap_dir disables recording.
+  // Paths must resolve under SOUNDBUBBLE_MEASURE_DIR or <repo>/measure.
+  std::string tap_dir;
+  std::string tap_select = "mapped,dry,wet";
+  double tap_max_seconds = 120.0;
+  double tap_max_mb = 1024.0;
 };
 
 ControllerConfig controller_config_from_json(const std::string& json_text);
@@ -141,8 +147,9 @@ class ProcessManager {
   std::string logs_json(int tail) const;
   std::string telemetry_json();
   std::string trials_json(const std::string& run_id, const std::string& since) const;
-  // SIGUSR1 is a single toggle in the capture runtime. arm and disarm both send
-  // it and the body is {"ok":true,"action":"toggle"}. Not owned -> 409.
+  // arm/disarm send SIGUSR1 only when the desired state differs from tracked
+  // state (runtime TapRecorder starts armed when --tap-dir is set). flush sends
+  // SIGUSR2. Not owned -> 409.
   TapResult signal_taps(const std::string& action);
   void ingest_line(const std::string& line);
   // Records a ControllerConfig as the owned child's config without spawning.

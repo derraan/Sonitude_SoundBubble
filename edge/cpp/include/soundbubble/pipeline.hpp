@@ -25,7 +25,7 @@ struct PipelineConfig {
   std::optional<int> output_device;
   int input_channels = 8;
   int output_channels = 2;
-  std::string channel_map = "0,1,2,3,4,5";
+  std::string channel_map = "5,4,3,2,1,0";  // MIC_INDEX_CANON.md §4
   int monitor_input_channel = 0;
   int input_sr = 24000;
   int model_sr = 24000;
@@ -53,6 +53,17 @@ struct PipelineConfig {
   // Default −0.5 dBFS ≈ 0.9440609 linear full-scale.
   float limiter_ceiling = 0.9440609f;
   float limiter_release_ms = 25.f;
+  float limiter_hold_ms = 15.f;
+  // Per-mic linear input gains indexed by DEVICE channel, applied right after
+  // capture (before channel map / DC / input gain). Raw tap stays untrimmed.
+  // --mic-gains (linear, > 0) or --mic-gains-db.
+  std::vector<float> mic_gains;
+  // Wet residual expander threshold (pre-output-gain dBFS). Applied to the DAC
+  // path only when the output is pure wet (mix_dry == 0, no wake). Taps stay
+  // pre-gate. <= -150 disables.
+  float wet_gate_dbfs = -58.f;
+  // ONNX dry runs before streams open (cold first inferences starve the ring).
+  int ort_warmup_runs = 12;
   float mix_dry = 0.f;
   float input_gain_db = 0.f;
   float alpha = 0.9999f;
@@ -87,6 +98,11 @@ struct PipelineConfig {
   int mix_uart_baud = 115200;
   std::string input_wav;
   std::string output_wav;
+  // WAV taps: off unless --tap-dir is set. Default select is mapped,dry,wet.
+  std::string tap_dir;
+  std::string tap_select = "raw,mapped,dry,wet";
+  double tap_max_seconds = 120.0;
+  double tap_max_mb = 1024.0;
   bool list_devices = false;
   bool preflight_only = false;
 };
@@ -141,6 +157,17 @@ class Engine {
   void request_stop(const std::string& reason);
   bool stopped() const { return stop_.load(); }
 
+  // Tap logging (SIGUSR1 toggle / SIGUSR2 flush on Linux; stdin TAP cmds everywhere).
+  void toggle_taps();
+  void request_tap_flush();
+  bool taps_armed() const;
+  void arm_taps();
+  void disarm_taps();
+  // Retarget in-memory tap sink to a new directory (creates dirs; clears buffers; disarms).
+  void retarget_tap_dir(const std::string& dir);
+  // Stdin control lines: STOP | TAP arm|disarm|flush|toggle|dir <path>
+  void handle_control_line(const std::string& line);
+
   void push_capture_for_test(CaptureItem item);
   bool process_one_for_test(double pop_timeout_sec);
   int output_ahead_frames() const;
@@ -156,9 +183,17 @@ class Engine {
   void reset_stream_timeline(bool clear_io_rings, bool clear_model_ring);
   std::vector<float> mix_wet_with_dry(const std::vector<float>& wet, const float* live_dry_or_null, int n);
   void apply_output_gain_and_limit(std::vector<float>& mono);
+  void declick_fill_edges(std::vector<float>& y_out, std::vector<std::uint8_t>& fill_mask, int frames);
+  // Capture wet (and optional aligned dry) pre-output_gain, then apply gain/limit.
+  void tap_dry_wet_then_gain(std::vector<float>& mono, const float* dry_or_null);
+  void poll_mix_tap_cmds();
+  void maybe_flush_taps();
+  void flush_taps();
 
   PipelineConfig cfg_;
   PeakLimiter out_limiter_;
+  ResidualGate wet_gate_;
+  bool last_write_was_fill_ = false;  // output ring tail state for gap declick
   RuntimeContract contract_{};
   bool have_contract_ = false;
   std::vector<int> selected_;
@@ -178,6 +213,7 @@ class Engine {
   std::unique_ptr<class StreamingResampler> out_src_;
   std::unique_ptr<class WakeRuntime> wake_;
   std::unique_ptr<class MixControl> mix_;
+  std::unique_ptr<class TapRecorder> taps_;
   DropOldestBuffer<CaptureItem> capture_;
   std::vector<float> current_frame_;
   std::vector<float> last_output_chunk_;
@@ -206,6 +242,7 @@ class Engine {
   std::atomic<bool> stop_{false};
   std::atomic<bool> worker_failed_{false};
   std::atomic<bool> callback_failed_{false};
+  std::atomic<bool> tap_flush_req_{false};
   std::string worker_error_;
   std::mutex err_mu_;
   std::thread worker_;

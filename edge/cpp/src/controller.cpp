@@ -100,7 +100,8 @@ void set_if(ControllerConfig& cfg, const Json& j) {
       "max_overrun_ms", "intra_op_threads", "inter_op_threads", "model_ring_ms", "max_steps_per_block", "require_soxr",
       "wake_model_dir", "wake_phrases_json", "wake_phrase", "wake_threshold", "wake_hold_sec", "wake_replay_sec", "wake_replay_rate",
       "wake_release_ms", "profile", "profile_interval", "monitor", "monitor_interval",
-      "mix_uart_port", "mix_uart_baud", "runtime"};
+      "mix_uart_port", "mix_uart_baud", "runtime",
+      "tap_dir", "tap_select", "tap_max_seconds", "tap_max_mb"};
   for (const auto& kv : j.o) {
     if (std::find(known.begin(), known.end(), kv.first) == known.end()) throw std::invalid_argument("Unknown config key(s): " + kv.first);
   }
@@ -173,6 +174,14 @@ void set_if(ControllerConfig& cfg, const Json& j) {
   }
   num_i("mix_uart_baud", cfg.mix_uart_baud);
   str_req("runtime", cfg.runtime);
+  {
+    std::optional<std::string> tap_dir;
+    str("tap_dir", tap_dir);
+    cfg.tap_dir = tap_dir.value_or("");
+  }
+  str_req("tap_select", cfg.tap_select);
+  num("tap_max_seconds", cfg.tap_max_seconds);
+  num("tap_max_mb", cfg.tap_max_mb);
 }
 
 std::string resolve_under(const std::optional<std::string>& text, const std::filesystem::path& repo, bool must_exist, const char* kind,
@@ -185,6 +194,33 @@ std::string resolve_under(const std::optional<std::string>& text, const std::fil
   bool ok = under_root(p, edge) || (allow_repo && under_root(p, repo));
   if (!ok) throw std::invalid_argument(std::string(kind) + " must be inside " + edge.string());
   if (must_exist && !std::filesystem::exists(p)) throw std::invalid_argument(std::string(kind) + " does not exist: " + p.string());
+  return p.string();
+}
+
+std::string measure_root_for(const std::string& repo_root) {
+  if (const char* env = std::getenv("SOUNDBUBBLE_MEASURE_DIR")) {
+    if (env[0] != '\0') return env;
+  }
+  return (std::filesystem::path(repo_root) / "measure").string();
+}
+
+// Empty -> ""; otherwise absolute path under measure root (created by TapRecorder).
+// Relative paths (including "measure/…") resolve under SOUNDBUBBLE_MEASURE_DIR / <repo>/measure.
+std::string resolve_tap_dir(const std::string& text, const std::string& repo_root) {
+  if (text.empty()) return {};
+  std::filesystem::path root(measure_root_for(repo_root));
+  std::filesystem::path p = text;
+  if (p.is_relative()) {
+    std::string generic = p.generic_string();
+    if (generic.rfind("measure/", 0) == 0) generic = generic.substr(8);
+    else if (generic == "measure") generic.clear();
+    p = generic.empty() ? root : (root / generic);
+  }
+  p = std::filesystem::weakly_canonical(p);
+  root = std::filesystem::weakly_canonical(root);
+  if (!under_root(p, root) && p != root) {
+    throw std::invalid_argument("tap_dir must be inside " + root.string());
+  }
   return p.string();
 }
 
@@ -242,6 +278,10 @@ ControllerConfig validate_controller_config(ControllerConfig cfg, const std::str
   if (cfg.zoo_dir) cfg.zoo_dir = resolve_under(cfg.zoo_dir, repo, true, "zoo_dir", false);
   if (cfg.wake_model_dir) cfg.wake_model_dir = resolve_under(cfg.wake_model_dir, repo, false, "wake_model_dir", true);
   if (cfg.wake_phrases_json) cfg.wake_phrases_json = resolve_under(cfg.wake_phrases_json, repo, true, "wake_phrases_json", true);
+  if (cfg.tap_select.empty()) cfg.tap_select = "mapped,dry,wet";
+  if (cfg.tap_max_seconds < 0.0) throw std::invalid_argument("tap_max_seconds must be >= 0");
+  if (cfg.tap_max_mb < 0.0) throw std::invalid_argument("tap_max_mb must be >= 0");
+  cfg.tap_dir = resolve_tap_dir(cfg.tap_dir, repo_root);
   return cfg;
 }
 
@@ -321,6 +361,12 @@ std::vector<std::string> build_pipeline_argv(const ControllerConfig& cfg_in, con
   if (!cfg.mix_uart_port.empty()) {
     add("--mix-uart-port", cfg.mix_uart_port);
     add_num("--mix-uart-baud", cfg.mix_uart_baud);
+  }
+  if (!cfg.tap_dir.empty()) {
+    add("--tap-dir", cfg.tap_dir);
+    add("--tap-select", cfg.tap_select);
+    add_num("--tap-max-seconds", cfg.tap_max_seconds);
+    add_num("--tap-max-mb", cfg.tap_max_mb);
   }
   for (const auto& phrase : cfg.wake_phrase) {
     argv.push_back("--wake-phrase");
@@ -692,6 +738,10 @@ std::string controller_config_to_json(const ControllerConfig& cfg) {
   j.o["mix_uart_port"] = json_string(cfg.mix_uart_port);
   j.o["mix_uart_baud"] = json_number(cfg.mix_uart_baud);
   j.o["runtime"] = json_string(cfg.runtime);
+  j.o["tap_dir"] = json_string(cfg.tap_dir);
+  j.o["tap_select"] = json_string(cfg.tap_select);
+  j.o["tap_max_seconds"] = json_number(cfg.tap_max_seconds);
+  j.o["tap_max_mb"] = json_number(cfg.tap_max_mb);
   return dump_json(j);
 }
 
@@ -936,8 +986,9 @@ std::string ProcessManager::start(const std::string& config_json) {
   last_profile_json_.clear();
   monitor_ = {};
   has_monitor_ = false;
-  taps_armed_ = false;
-  taps_select_.clear();
+  // TapRecorder starts armed when --tap-dir is set; keep controller bookkeeping in sync.
+  taps_armed_ = !cfg.tap_dir.empty();
+  taps_select_ = cfg.tap_dir.empty() ? std::string() : cfg.tap_select;
   taps_truncated_ = false;
   runtime_ = cfg.runtime;
   bubble_radius_ = cfg.bubble_radius;
@@ -1277,10 +1328,10 @@ std::string ProcessManager::telemetry_json() {
 }
 
 TapResult ProcessManager::signal_taps(const std::string& action) {
-  if (action != "arm" && action != "disarm") {
+  if (action != "arm" && action != "disarm" && action != "flush") {
     Json err;
     err.type = Json::Type::Object;
-    err.o["error"] = json_string("action must be arm or disarm");
+    err.o["error"] = json_string("action must be arm, disarm, or flush");
     return TapResult{400, dump_json(err)};
   }
   std::lock_guard<std::recursive_mutex> lock(mu_);
@@ -1293,21 +1344,45 @@ TapResult ProcessManager::signal_taps(const std::string& action) {
 #if defined(_WIN32)
   Json err;
   err.type = Json::Type::Object;
-  err.o["error"] = json_string("SIGUSR1 is not available on this host");
+  err.o["error"] = json_string("SIGUSR1/SIGUSR2 are not available on this host");
   return TapResult{400, dump_json(err)};
 #else
   pid_t child = static_cast<pid_t>(reinterpret_cast<intptr_t>(process_));
+  if (action == "flush") {
+    if (kill(child, SIGUSR2) != 0) {
+      Json err;
+      err.type = Json::Type::Object;
+      err.o["error"] = json_string("signal failed");
+      return TapResult{400, dump_json(err)};
+    }
+    Json ok;
+    ok.type = Json::Type::Object;
+    ok.o["ok"] = json_bool(true);
+    ok.o["action"] = json_string("flush");
+    return TapResult{200, dump_json(ok)};
+  }
+  const bool want_armed = action == "arm";
+  if (want_armed == taps_armed_) {
+    Json ok;
+    ok.type = Json::Type::Object;
+    ok.o["ok"] = json_bool(true);
+    ok.o["action"] = json_string(want_armed ? "arm" : "disarm");
+    ok.o["armed"] = json_bool(taps_armed_);
+    ok.o["noop"] = json_bool(true);
+    return TapResult{200, dump_json(ok)};
+  }
   if (kill(child, SIGUSR1) != 0) {
     Json err;
     err.type = Json::Type::Object;
     err.o["error"] = json_string("signal failed");
     return TapResult{400, dump_json(err)};
   }
-  taps_armed_ = !taps_armed_;
+  taps_armed_ = want_armed;
   Json ok;
   ok.type = Json::Type::Object;
   ok.o["ok"] = json_bool(true);
-  ok.o["action"] = json_string("toggle");
+  ok.o["action"] = json_string(want_armed ? "arm" : "disarm");
+  ok.o["armed"] = json_bool(taps_armed_);
   return TapResult{200, dump_json(ok)};
 #endif
 }

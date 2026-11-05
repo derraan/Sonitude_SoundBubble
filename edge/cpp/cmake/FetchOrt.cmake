@@ -52,6 +52,11 @@ if(EXISTS "${_ort_dir}/include/onnxruntime_cxx_api.h")
       IMPORTED_LOCATION "${_ort_dir}/lib/onnxruntime.dll"
       INTERFACE_INCLUDE_DIRECTORIES "${_ort_dir}/include")
     set(SOUNDBUBBLE_ORT_RUNTIME_DLL "${_ort_dir}/lib/onnxruntime.dll" CACHE INTERNAL "")
+    # Providers shared DLL is optional but must match the same ORT build when present.
+    if(EXISTS "${_ort_dir}/lib/onnxruntime_providers_shared.dll")
+      set(SOUNDBUBBLE_ORT_PROVIDERS_DLL
+        "${_ort_dir}/lib/onnxruntime_providers_shared.dll" CACHE INTERNAL "")
+    endif()
   else()
     file(GLOB _ort_so "${_ort_dir}/lib/libonnxruntime.so*")
     list(GET _ort_so 0 _ort_so0)
@@ -65,3 +70,28 @@ if(EXISTS "${_ort_dir}/include/onnxruntime_cxx_api.h")
 else()
   set(SOUNDBUBBLE_HAS_ORT FALSE)
 endif()
+
+# Windows loads System32\onnxruntime.dll (often older) unless the matching
+# FetchOrt DLL sits beside the exe. Call after add_executable(...).
+function(soundbubble_copy_ort_runtime tgt)
+  if(NOT WIN32 OR NOT SOUNDBUBBLE_HAS_ORT OR NOT SOUNDBUBBLE_ORT_RUNTIME_DLL)
+    return()
+  endif()
+  if(NOT TARGET ${tgt})
+    message(FATAL_ERROR "soundbubble_copy_ort_runtime: unknown target ${tgt}")
+  endif()
+  add_custom_command(TARGET ${tgt} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${SOUNDBUBBLE_ORT_RUNTIME_DLL}"
+      "$<TARGET_FILE_DIR:${tgt}>/onnxruntime.dll"
+    COMMENT "Copy onnxruntime.dll beside ${tgt} (avoid System32 ORT mismatch)"
+    VERBATIM)
+  if(SOUNDBUBBLE_ORT_PROVIDERS_DLL)
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${SOUNDBUBBLE_ORT_PROVIDERS_DLL}"
+        "$<TARGET_FILE_DIR:${tgt}>/onnxruntime_providers_shared.dll"
+      COMMENT "Copy onnxruntime_providers_shared.dll beside ${tgt}"
+      VERBATIM)
+  endif()
+endfunction()
