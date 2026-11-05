@@ -1,0 +1,4 @@
+# Allow the dashboard controller (user sonitude) to free the Pico for owned
+# start/restart without an interactive sudo password.
+# Install: sudo bash edge/rpi5/install_soundbubble_ctl_sudoers.sh
+sonitude ALL=(root) NOPASSWD: /usr/bin/systemctl stop sonitude-soundbubble, /bin/systemctl stop sonitude-soundbubble

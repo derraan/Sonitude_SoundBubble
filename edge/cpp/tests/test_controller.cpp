@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <thread>
 
 TEST(ControllerConfig, RejectsUnknownAndBuildsCppArgv) {
   EXPECT_THROW(soundbubble::controller_config_from_json("{\"nope\":1}"), std::invalid_argument);
@@ -204,3 +206,78 @@ TEST(ControllerConfig, TapDirArgvForCppAndPython) {
   auto off = soundbubble::build_pipeline_argv(cfg, repo.string(), "soundbubble-rt");
   EXPECT_EQ(std::find(off.begin(), off.end(), "--tap-dir"), off.end());
 }
+
+TEST(ControllerConfig, MicGainsArgvCppOnlyAndValidated) {
+  auto repo = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  auto model = repo / "edge" / "model.onnx";
+  auto contract = repo / "edge" / "model.runtime.json";
+  if (!std::filesystem::exists(model) || !std::filesystem::exists(contract)) GTEST_SKIP() << "model artifacts missing";
+  std::string base = std::string("{\"model\":\"") + model.generic_string() + "\",\"contract_path\":\"" + contract.generic_string() +
+                     "\",\"runtime\":\"cpp\",\"mic_gains\":";
+  auto cfg = soundbubble::controller_config_from_json(base + "\"1.514,1.514,6.457,1.514,1.514,6.683\"}");
+  EXPECT_EQ(cfg.mic_gains, "1.514,1.514,6.457,1.514,1.514,6.683");
+  auto argv = soundbubble::build_pipeline_argv(cfg, repo.string(), "soundbubble-rt");
+  auto it = std::find(argv.begin(), argv.end(), "--mic-gains");
+  ASSERT_NE(it, argv.end());
+  EXPECT_EQ(*(it + 1), "1.514,1.514,6.457,1.514,1.514,6.683");
+  EXPECT_NE(soundbubble::controller_config_to_json(cfg).find("\"mic_gains\""), std::string::npos);
+  cfg.runtime = "python";
+  auto py = soundbubble::build_pipeline_argv(cfg, repo.string(), "soundbubble-rt");
+  EXPECT_EQ(std::find(py.begin(), py.end(), "--mic-gains"), py.end());
+  for (const char* bad : {"\"0,1,1\"", "\"abc\"", "\"-1\"", "\"1,1,1,1,1,1,1,1,1\""}) {
+    auto b = soundbubble::controller_config_from_json(base + bad + "}");
+    EXPECT_THROW(soundbubble::build_pipeline_argv(b, repo.string(), "soundbubble-rt"), std::invalid_argument) << bad;
+  }
+  auto off = soundbubble::controller_config_from_json(base + "\"\"}");
+  auto argv_off = soundbubble::build_pipeline_argv(off, repo.string(), "soundbubble-rt");
+  EXPECT_EQ(std::find(argv_off.begin(), argv_off.end(), "--mic-gains"), argv_off.end());
+}
+
+#if !defined(_WIN32)
+#include <unistd.h>
+TEST(ControllerSession, DatasetRecordingWritesSessionLogAndTelemetry) {
+  auto repo = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  auto model = repo / "edge" / "model.onnx";
+  auto contract = repo / "edge" / "model.runtime.json";
+  if (!std::filesystem::exists(model) || !std::filesystem::exists(contract)) GTEST_SKIP() << "model artifacts missing";
+  if (std::system("systemctl is-active --quiet sonitude-soundbubble 2>/dev/null") == 0) GTEST_SKIP() << "production unit active";
+  auto tmp = std::filesystem::temp_directory_path() / ("sb_session_test_" + std::to_string(::getpid()));
+  std::filesystem::create_directories(tmp / "measure");
+  auto fake = tmp / "fake-rt.sh";
+  {
+    std::ofstream f(fake);
+    f << "#!/bin/sh\n"
+         "echo \"[profile] mode=normal  capture_age=0.03ms  infer_mean=2.44ms  e2e=6.58ms  underrun_frames=0\"\n"
+         "echo \"ch0:  -61.5 dBFS ok         ch1:  -64.6 dBFS ok         ch2:  -65.6 dBFS ok\"\n"
+         "echo \"out: wet_pre= -68.8 dBFS  wet_post= -72.3 dBFS  peak= -57.1 dBFS  play= -72.3 dBFS  frames=768\"\n"
+         "sleep 5\n";
+  }
+  std::filesystem::permissions(fake, std::filesystem::perms::owner_all);
+  setenv("SOUNDBUBBLE_MEASURE_DIR", (tmp / "measure").c_str(), 1);
+  soundbubble::ProcessManager pm(repo.string(), fake.string(), "python3");
+  std::string cfg = std::string("{\"model\":\"") + model.generic_string() + "\",\"contract_path\":\"" + contract.generic_string() +
+                    "\",\"runtime\":\"cpp\",\"tap_dir\":\"measure/dashboard\",\"tap_select\":\"raw,wet\"}";
+  pm.start(cfg);
+  std::this_thread::sleep_for(std::chrono::milliseconds(700));
+  pm.stop();
+  unsetenv("SOUNDBUBBLE_MEASURE_DIR");
+  std::vector<std::filesystem::path> sessions;
+  for (const auto& e : std::filesystem::directory_iterator(tmp / "measure" / "dashboard")) sessions.push_back(e.path());
+  ASSERT_EQ(sessions.size(), 1u);
+  const auto& s = sessions[0];
+  EXPECT_EQ(s.filename().string().size(), 15u);  // YYYYmmdd_HHMMSS
+  for (const char* f : {"session.json", "pipeline.log", "telemetry.jsonl", "session_end.json"}) {
+    EXPECT_TRUE(std::filesystem::exists(s / f)) << f;
+  }
+  std::ifstream log(s / "pipeline.log");
+  std::string all((std::istreambuf_iterator<char>(log)), std::istreambuf_iterator<char>());
+  EXPECT_NE(all.find("[profile]"), std::string::npos);
+  std::ifstream tel(s / "telemetry.jsonl");
+  std::string tl((std::istreambuf_iterator<char>(tel)), std::istreambuf_iterator<char>());
+  EXPECT_NE(tl.find("\"kind\":\"profile\""), std::string::npos);
+  std::ifstream sj(s / "session.json");
+  std::string sjs((std::istreambuf_iterator<char>(sj)), std::istreambuf_iterator<char>());
+  EXPECT_NE(sjs.find(s.string()), std::string::npos);  // argv --tap-dir points at the session folder
+  std::filesystem::remove_all(tmp);
+}
+#endif

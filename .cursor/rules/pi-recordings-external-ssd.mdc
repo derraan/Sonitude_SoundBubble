@@ -1,0 +1,12 @@
+---
+description: Pi recording data goes only to the external SSD folder sonitude-recordings; the rest of the drive is the owner's personal data
+alwaysApply: true
+---
+
+# Pi recordings: external SSD only
+
+- All Pi recording data (dashboard Dataset recording, `record_session.sh`, `pi_mic_check.py`, service `TAP_DIR`) is stored **only** in `/mnt/sonitude-drive/sonitude-recordings/` (Samsung T5, exFAT, fstab UUID `B424-9B8F`). `~/sb_rt_dev/measure` is a symlink to it.
+- The drive also holds the owner's **personal files**. Agents must never list in detail, read, write, move, rename or delete anything outside `sonitude-recordings/`.
+- Never record to the SD card. Scripts refuse if `/mnt/sonitude-drive` isn't mounted; keep that guard.
+- Mounting, unmounting and fstab are owner (sudo) actions.
+- Reference: `docs/pi_dashboard_models_and_recording_20261105.md`.
