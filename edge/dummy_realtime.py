@@ -1,3 +1,10 @@
+"""Lab-only PyTorch realtime harness (needs torch + src/).
+
+Not the production edge path: it uses a deep FIFO capture queue instead of the
+drop-oldest contract in edge/inference_pipeline.py, so it accumulates latency
+under load. Do not deploy this on the Pi.
+"""
+
 from __future__ import annotations
 
 import argparse

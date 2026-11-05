@@ -5,7 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.signal import lfilter, resample_poly
+from scipy.signal import firwin, lfilter, resample_poly
 
 try:
     import soxr  # type: ignore
@@ -15,6 +15,22 @@ except Exception:
 
 def dbfs_to_linear(db: float) -> float:
     return float(10.0 ** (float(db) / 20.0))
+
+
+def rms_dbfs(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    if x.size == 0:
+        return -120.0
+    rms = float(np.sqrt(np.mean(np.square(x)) + 1e-12))
+    return float(20.0 * np.log10(max(rms, 1e-10)))
+
+
+def peak_dbfs(x: np.ndarray) -> float:
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    if x.size == 0:
+        return -120.0
+    peak = float(np.max(np.abs(x))) if x.size else 0.0
+    return float(20.0 * np.log10(max(peak, 1e-10)))
 
 
 def render_monitor(levels: np.ndarray, statuses: list[str]) -> str:
@@ -57,13 +73,117 @@ def resample_poly_exact(x: np.ndarray, src_sr: int, dst_sr: int, axis: int = -1)
     return y.astype(np.float32, copy=False)
 
 
+class HalfbandResampler:
+    """Causal, stateful 2x up- or down-sampler (linear-phase FIR, ~0.5 ms delay at 48 kHz).
+
+    Output length is exactly proportional to input length on every block, unlike SoXR's
+    streaming mode, which releases ~30 ms bursts.
+    """
+
+    def __init__(self, *, up: bool, num_channels: int, num_taps: int = 48) -> None:
+        self.up = bool(up)
+        self.num_channels = int(num_channels)
+        # Cutoff at half the high-rate Nyquist (= Nyquist of the low rate).
+        h = firwin(int(num_taps), 0.5, window=("kaiser", 8.0)).astype(np.float64)
+        self._h = h * 2.0 if self.up else h
+        self._zi = np.zeros((self.num_channels, len(h) - 1), dtype=np.float64)
+        self._consumed = 0
+
+    def reset(self) -> None:
+        self._zi.fill(0.0)
+        self._consumed = 0
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        n = int(x.shape[1])
+        if n == 0:
+            return np.zeros((self.num_channels, 0), dtype=np.float32)
+        if self.up:
+            z = np.zeros((self.num_channels, 2 * n), dtype=np.float64)
+            z[:, ::2] = x
+            y, self._zi = lfilter(self._h, 1.0, z, axis=-1, zi=self._zi)
+            return y.astype(np.float32)
+        y, self._zi = lfilter(self._h, 1.0, x, axis=-1, zi=self._zi)
+        start = (-self._consumed) % 2
+        self._consumed += n
+        return y[:, start::2].astype(np.float32)
+
+
+class FixedRatioASRC:
+    """Causal linear ASRC with long-term exact sample accounting.
+
+    Per-block output length varies by at most ~1 sample (not SoXR's ~30 ms bursts).
+    `correction_ratio` scales the destination rate (1 - ppm*1e-6 from DriftMonitor).
+    """
+
+    def __init__(self, *, src_sr: int, dst_sr: int, num_channels: int) -> None:
+        self.src_sr = float(src_sr)
+        self.dst_sr_nominal = float(dst_sr)
+        self.dst_sr = float(dst_sr)
+        self.num_channels = int(num_channels)
+        self._correction = 1.0
+        self._ratio = self.src_sr / max(1e-6, self.dst_sr)
+        self._buf = np.zeros((self.num_channels, 0), dtype=np.float64)
+        self._buf_start = 0.0
+        self._next_src_pos = 0.0
+        self._src_total = 0
+        self._dst_total = 0
+
+    def set_correction_ratio(self, ratio: float) -> None:
+        self._correction = float(np.clip(ratio, 0.98, 1.02))
+        self.dst_sr = self.dst_sr_nominal * self._correction
+        self._ratio = self.src_sr / max(1e-6, self.dst_sr)
+
+    def reset(self) -> None:
+        self._buf = np.zeros((self.num_channels, 0), dtype=np.float64)
+        self._buf_start = 0.0
+        self._next_src_pos = 0.0
+        self._src_total = 0
+        self._dst_total = 0
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=np.float64)
+        if x.ndim != 2 or x.shape[0] != self.num_channels:
+            raise ValueError(f"expected [C,T] with C={self.num_channels}, got {x.shape}")
+        n = int(x.shape[1])
+        if n == 0:
+            return np.zeros((self.num_channels, 0), dtype=np.float32)
+        if abs(self.src_sr - self.dst_sr) < 1e-9 and abs(self._correction - 1.0) < 1e-12:
+            return x.astype(np.float32)
+
+        self._buf = np.concatenate([self._buf, x], axis=1) if self._buf.shape[1] else x.copy()
+        self._src_total += n
+        target_dst = int(math.floor(self._src_total * self.dst_sr / self.src_sr + 1e-12))
+        want = max(0, target_dst - self._dst_total)
+        # Largest n_out such that next_src_pos + (n_out-1)*ratio + 1 stays inside the buffer.
+        span = float(self._buf.shape[1]) - 1.0 - (self._next_src_pos - self._buf_start)
+        max_out = 0 if span < 0.0 else int(math.floor(span / self._ratio + 1e-12)) + 1
+        n_out = min(want, max(0, max_out))
+        if n_out <= 0:
+            return np.zeros((self.num_channels, 0), dtype=np.float32)
+
+        positions = self._next_src_pos + self._ratio * np.arange(n_out, dtype=np.float64)
+        local = positions - self._buf_start
+        i0 = np.floor(local).astype(np.int64)
+        frac = (local - i0).astype(np.float64)
+        y = (1.0 - frac) * self._buf[:, i0] + frac * self._buf[:, i0 + 1]
+        self._next_src_pos = float(positions[-1] + self._ratio)
+        self._dst_total += n_out
+        keep_from = max(0, int(math.floor(self._next_src_pos - self._buf_start)) - 1)
+        if keep_from > 0:
+            self._buf = self._buf[:, keep_from:]
+            self._buf_start += float(keep_from)
+        return y.astype(np.float32)
+
+
 class StreamingResampler:
     """
     Stateful streaming SRC wrapper.
 
-    Primary backend is SoXR (streaming state kept internally). If SoXR is not
-    available, this falls back to a bounded-history polyphase approach that
-    preserves filter history across blocks.
+    - 44.1 kHz <-> 24 kHz: ASRC to 48 kHz then causal half-band (smooth blocks).
+    - Exact 2:1 / 1:2: causal half-band FIR.
+    - 44.1 kHz <-> 48 kHz: FixedRatioASRC alone.
+    - Else: SoXR stream, or polyphase fallback if SoXR is missing.
     """
 
     def __init__(self, *, src_sr: int, dst_sr: int, num_channels: int, quality: str = "VHQ") -> None:
@@ -77,23 +197,59 @@ class StreamingResampler:
         if self.num_channels <= 0:
             raise ValueError("num_channels must be positive.")
 
-        self._use_soxr = soxr is not None and hasattr(soxr, "ResampleStream")
-        self.backend = "soxr-stream" if self._use_soxr else "polyphase-fallback"
+        self._asrc: FixedRatioASRC | None = None
+        self._halfband: HalfbandResampler | None = None
+        self._rate_trim: FixedRatioASRC | None = None
         self._stream = None
+        self._use_soxr = False
+
+        pair = {self.src_sr, self.dst_sr}
+        if pair == {44100, 24000}:
+            # Capture/model bridge: ASRC 44.1<->48, then exact half-band 48<->24.
+            up = self.dst_sr > self.src_sr
+            if up:
+                self._halfband = HalfbandResampler(up=True, num_channels=self.num_channels)
+                self._asrc = FixedRatioASRC(src_sr=48000, dst_sr=44100, num_channels=self.num_channels)
+                self.backend = "halfband-asrc"
+            else:
+                self._asrc = FixedRatioASRC(src_sr=44100, dst_sr=48000, num_channels=self.num_channels)
+                self._halfband = HalfbandResampler(up=False, num_channels=self.num_channels)
+                self.backend = "asrc-halfband"
+        elif pair == {44100, 48000}:
+            self._asrc = FixedRatioASRC(src_sr=self.src_sr, dst_sr=self.dst_sr, num_channels=self.num_channels)
+            self.backend = "asrc-linear"
+        elif self.dst_sr == 2 * self.src_sr or self.src_sr == 2 * self.dst_sr:
+            self._halfband = HalfbandResampler(up=self.dst_sr > self.src_sr, num_channels=self.num_channels)
+            # Micro rate trim for clock drift (identity when correction_ratio == 1).
+            self._rate_trim = FixedRatioASRC(src_sr=self.dst_sr, dst_sr=self.dst_sr, num_channels=self.num_channels)
+            self.backend = "halfband-fir"
+        else:
+            self._use_soxr = soxr is not None and hasattr(soxr, "ResampleStream")
+            self.backend = "soxr-stream" if self._use_soxr else "polyphase-fallback"
 
         # Polyphase streaming fallback state.
         g = math.gcd(self.src_sr, self.dst_sr)
         self._up = self.dst_sr // g
         self._down = self.src_sr // g
-        # Conservative history to preserve FIR phase across blocks.
         self._hist_len = int(max(32, 16 * max(self._up, self._down)))
         self._hist = np.zeros((self.num_channels, self._hist_len), dtype=np.float32)
 
         if self._use_soxr:
-            # soxr.ResampleStream accepts interleaved [T,C] float32.
             self._stream = soxr.ResampleStream(self.src_sr, self.dst_sr, self.num_channels, dtype="float32", quality=self.quality)
 
+    def set_correction_ratio(self, ratio: float) -> None:
+        if self._rate_trim is not None:
+            self._rate_trim.set_correction_ratio(ratio)
+        elif self._asrc is not None and self._halfband is None:
+            self._asrc.set_correction_ratio(ratio)
+
     def reset(self) -> None:
+        if self._asrc is not None:
+            self._asrc.reset()
+        if self._halfband is not None:
+            self._halfband.reset()
+        if self._rate_trim is not None:
+            self._rate_trim.reset()
         if self._use_soxr:
             self._stream = soxr.ResampleStream(self.src_sr, self.dst_sr, self.num_channels, dtype="float32", quality=self.quality)
         self._hist.fill(0.0)
@@ -105,8 +261,21 @@ class StreamingResampler:
         if x.shape[1] == 0 or self.src_sr == self.dst_sr:
             return x.astype(np.float32, copy=False)
 
+        if self.backend == "asrc-halfband":
+            assert self._asrc is not None and self._halfband is not None
+            return self._halfband.process(self._asrc.process(x))
+        if self.backend == "halfband-asrc":
+            assert self._asrc is not None and self._halfband is not None
+            return self._asrc.process(self._halfband.process(x))
+        if self._halfband is not None:
+            y = self._halfband.process(x)
+            if self._rate_trim is not None and abs(self._rate_trim._correction - 1.0) > 1e-9:
+                y = self._rate_trim.process(y)
+            return y
+        if self._asrc is not None:
+            return self._asrc.process(x)
+
         if self._use_soxr and self._stream is not None:
-            # soxr expects [T,C]
             y_tc = self._stream.resample_chunk(x.T, last=False)
             return np.asarray(y_tc, dtype=np.float32).T
 
@@ -124,7 +293,6 @@ class StreamingResampler:
         hist_out_len = int(round(self._hist_len * self.dst_sr / self.src_sr))
         y = y_ext[:, hist_out_len:]
 
-        # Update history with newest samples.
         if x.shape[-1] >= self._hist_len:
             self._hist[:, :] = x[:, -self._hist_len :]
         else:

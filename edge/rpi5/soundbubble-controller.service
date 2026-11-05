@@ -2,14 +2,16 @@
 Description=Sound Bubble Remote Controller
 After=network-online.target tailscaled.service
 Wants=network-online.target
+# The C++ Sonitude pipeline holds the Pico and DAC; only one may run.
+Conflicts=sonitude.service
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/Sound_Bubble
+User=sonitude
+WorkingDirectory=/home/sonitude/Sonitude/Sound_Bubble
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/soundbubble-controller.env
-ExecStart=/home/pi/Sound_Bubble/.venv/bin/python -m edge.controller.app --host 0.0.0.0 --port 8000
+ExecStart=/home/sonitude/Sonitude/Sound_Bubble/.venv/bin/python -m edge.controller.app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=2
 SupplementaryGroups=audio

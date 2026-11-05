@@ -220,8 +220,8 @@ While **`shed`**, the worker does not flip back to normal inside the budget bloc
 
 After the stepping loop, `missing_steps = max(0, hops_per_io - steps_run)` (hops that were **not** executed wet, e.g. ring underrun or budget capped at 0).
 
-- **`dry_fill` (default)**: append `missing_steps * frames_per_hop_out` output frames read from the dry timeline (`DryReferenceRing.read_into_output`), replicated to output channels. Keeps **continuous** output when wet cannot fill the block; effect may be partially bypassed for those frames.
-- **`silence_fill`**: append zeros for the same frame count.
+- **`silence_fill` (default)**: append zeros for `missing_steps * frames_per_hop_out` frames. No dry mic bleed under overload (same as stock `lowlat` launcher).
+- **`dry_fill`**: append the same frame count from the dry timeline (`DryReferenceRing.read_into_output`), replicated to output channels. Keeps continuous output but can leak raw mic audio when wet cannot fill the block.
 - **`strict`**: no synthetic tail; output may be short (more underrun risk).
 
 When fill is used, a **deferred** timeline reset is scheduled so recurrent state matches the fact that those hops were not processed wet.
@@ -246,7 +246,7 @@ Do **not** clear output already written for this cycle before handling fill. The
 
 Worker-local reset (see `inference_pipeline.py`):
 
-- `in_src.reset()`, `out_src.reset()`, `onnx_streamer.reset_state_and_warm()`
+- `in_src.reset()`, `out_src.reset()`, `onnx_streamer.reset_state()`
 - `current_frame.fill(0.0)`, `last_output_chunk[0].fill(0.0)`
 - `model_ring.clear()` when supported
 - If `clear_io_rings=True` (model ring drop path): `output_ring.clear()`, `dry_ref.clear()`
@@ -317,7 +317,7 @@ Adjust device indices and paths as needed:
   --model-ring-ms 64 \
   --target-output-ahead-sec 0.040 \
   --max-output-ahead-sec 0.080 \
-  --overload-policy dry_fill \
+  --overload-policy silence_fill \
   --intra-op-threads 2 \
   --inter-op-threads 1 \
   --mix-dry 0 \
@@ -357,7 +357,7 @@ Longer-term ways to regain headroom: **larger effective hop** (e.g. more samples
 | [`realtime/dry_reference.py`](realtime/dry_reference.py) | Dry timeline + `read_into_output`. |
 | [`realtime/contracts.py`](realtime/contracts.py) | `RealtimeContract` validation for capture/output ahead bounds. |
 | [`realtime/audio_io.py`](realtime/audio_io.py) | Stream construction and preflight. |
-| [`pipeline/onnx_streamer.py`](pipeline/onnx_streamer.py) | ONNX session and `reset_state_and_warm`. |
+| [`pipeline/onnx_streamer.py`](pipeline/onnx_streamer.py) | ONNX session, `reset_state`, and startup `warmup` (seeds the inference-time estimate). |
 
 ---
 

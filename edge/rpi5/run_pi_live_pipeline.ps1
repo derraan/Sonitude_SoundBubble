@@ -1,175 +1,142 @@
-param()
+param(
+  [string]$PiHost   = "172.20.10.8",
+  [string]$PiUser   = "sonitude",
+  # Code + zoo are synced here; the Sonitude checkout (~/Sonitude) is left untouched.
+  [string]$PiRepo   = "/home/sonitude/sb_rt_dev",
+  [string]$PiVenv   = "/home/sonitude/Sonitude/Sound_Bubble/.venv",
 
-# ---------- CONFIG ----------
-$PiUser   = "soundbubble"
-$PiHost   = "soundpi.local"     # or Pi IP
-$PiRepo   = "/home/$PiUser/Sound_Bubble"
+  # baseline = legacy pre-plan launcher values (44.1 kHz — A/B only; avoid for production)
+  # defaults = only device/model flags; pipeline default input_sr is now 48000 (B7)
+  # lowlat   = production low-latency path (48 kHz Pico UAC2 + silence_fill)
+  [ValidateSet("baseline", "defaults", "lowlat")]
+  [string]$Preset   = "lowlat",
 
-$LocalOnnx      = "C:\Users\darre\Sound_Bubble\edge\model.onnx"
-$LocalContract  = "C:\Users\darre\Sound_Bubble\edge\model.runtime.json"
+  [string]$ZooDir       = "edge/zoo",
+  [double]$BubbleRadius = 1.5,
+  # Explicit model inside the synced repo, e.g. edge/zoo/optim_pretrain_1_5m.onnx; overrides the zoo.
+  [string]$Model        = "",
 
-# Model zoo (optional). If $UseZoo = $true, syncs the whole zoo dir and selects
-# by --bubble-radius at runtime. $LocalZooDir should contain paired
-# <name>.onnx + <name>.runtime.json files produced by edge/export_to_onnx.py.
-$UseZoo        = $false
-$LocalZooDir   = "C:\Users\darre\Sound_Bubble\edge\zoo"
-$BubbleRadius  = 1.5
+  # Device IDs on Pi (from `python edge/inference_pipeline.py --list-devices`). Pick the real
+  # hw:*,* devices, NOT 'sysdefault' / 'default' / 'dmix' - those xrun under real signal.
+  [int]$InputDeviceIdx  = 1,
+  [int]$OutputDeviceIdx = 0,
+  [int]$InputChannels   = 8,
+  [int]$OutputChannels  = 2,
+  [string]$ChannelMap   = "0,1,2,3,4,5",
+  [double]$MixDry       = 0.0,
+  # Quiet INMP441s sit well under -50 dBFS; mute threshold must be lower (B8).
+  [double]$SilenceDbfs  = -100.0,
 
-# Device IDs on Pi (from `python -c "import sounddevice as sd; print(sd.query_devices())"`).
-# Pick the real hw:*,* devices, NOT the 'sysdefault' / 'default' / 'dmix' virtual aliases —
-# those route through dmix/plug and will xrun the moment the model produces real signal.
-# Example mapping on this rig:
-#   [0] Sound Blaster X1 (hw:0,0) out=8 default_sr=48000  -> OUTPUT
-#   [1] INMP441 8ch      (hw:3,0) in=8  default_sr=44100  -> INPUT
-$InputDeviceIdx  = 1
-$OutputDeviceIdx = 0
+  # Per-run overrides of the preset (0 / "" = use preset value).
+  [int]$InputSR           = 0,
+  [int]$HopsPerIo         = 0,
+  [int]$IntraOpThreads    = 0,
+  [int]$MaxStepsPerBlock  = 0,
+  [double]$TargetAheadSec = 0,
+  [double]$MaxAheadSec    = 0,
+  [string]$QueuePolicy    = "",
+  [string]$OverloadPolicy = "",
 
-# Audio config
-$InputChannels = 8
-$OutputChannels = 2
-$ChannelMap = "0,1,2,3,4,5"
-$InputSR = 44100
-$ModelSR = 24000
-$OutputSR = 48000
+  # SCHED_FIFO via `chrt`. Works without sudo when /etc/security/limits.d grants rtprio.
+  [int]$RtPrio = 50,
+  [int]$DurationSec = 0,     # 0 = run until Ctrl+C
+  [switch]$SyncCode,         # tar edge/ (incl. zoo) from this checkout to $PiRepo first
+  [switch]$RequirePreemptRt
+)
 
-# ONNX Runtime threading. Pi 5 has 4 cores; keep intra <= cores-1 so the
-# PortAudio output callback thread can schedule and hold its GIL slot,
-# otherwise you will hit the ALSA xrun cascade the moment real signal
-# arrives. See PiSetup_BringUp.md §7a.
-$IntraOpThreads = 3
-$InterOpThreads = 1
-# Output ring-buffer depth in model hops. 4 = lowest latency, 8 = jitter-tolerant.
-$HopsPerIo = 8
+$ErrorActionPreference = "Stop"
+$Pi = "$PiUser@$PiHost"
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 
-# SCHED_FIFO wrapper. Required on this rig for crackle-free --mix-dry 1.0.
-# 'sudo' -> password prompt once over ssh -t (works because we allocate a TTY).
-# If you've run `sudo setcap cap_sys_nice+eip "$(readlink -f .venv/bin/python3)"`
-# on the Pi, set $UseSudoForChrt = $false and it'll run without prompting.
-# Set $UseRtPrio = $false to disable entirely (not recommended).
-$UseRtPrio      = $true
-$UseSudoForChrt = $true
+$Presets = @{
+  baseline = @{ InputSR = 44100; HopsPerIo = 8; IntraOpThreads = 3; MaxStepsPerBlock = 0; TargetAheadSec = 0; MaxAheadSec = 0; QueuePolicy = ""; OverloadPolicy = "" }
+  defaults = @{ InputSR = 0;     HopsPerIo = 0; IntraOpThreads = 0; MaxStepsPerBlock = 0; TargetAheadSec = 0; MaxAheadSec = 0; QueuePolicy = ""; OverloadPolicy = "" }
+  lowlat   = @{ InputSR = 48000; HopsPerIo = 1; IntraOpThreads = 2; MaxStepsPerBlock = 1; TargetAheadSec = 0.012; MaxAheadSec = 0.030; QueuePolicy = "adaptive"; OverloadPolicy = "silence_fill" }
+}
+$P = $Presets[$Preset].Clone()
+foreach ($k in @($P.Keys)) {
+  $v = Get-Variable -Name $k -ValueOnly
+  if ($v -and "$v" -ne "0") { $P[$k] = $v }
+}
 
-# Determinism gates (recommended)
-$CheckCpuGovernor      = $true
-$RequireCpuPerformance = $true
-$CheckPreemptRt        = $true
-$RequirePreemptRt      = $false
+function Invoke-Pi([string]$Cmd) { ssh -o BatchMode=yes $Pi $Cmd }
 
-# ---------- RUN ----------
+Write-Host "[1/5] Check SSH ($Pi)"
+Invoke-Pi "echo connected" | Out-Host
+if ($LASTEXITCODE -ne 0) { Write-Host "SSH failed. If the hotspot changed the Pi's IP: arp -a | findstr 2c-cf-67" -ForegroundColor Red; exit 1 }
+
+Write-Host "[1b/5] Preflight: audio owner, kernel, governor, rtprio"
+$Svc = Invoke-Pi "systemctl is-active sonitude.service 2>/dev/null || true"
+if ($Svc -eq "active") {
+  Write-Host "sonitude.service is running and holds the Pico/DAC. Stop it: sudo systemctl stop sonitude.service" -ForegroundColor Red
+  exit 4
+}
+$Cfg = Invoke-Pi "grep -c '^CONFIG_PREEMPT_RT=y' /boot/config-`$(uname -r) 2>/dev/null || true"
+if ($Cfg -ne "1") {
+  $Msg = "[warn] PREEMPT_RT kernel not detected (CONFIG_PREEMPT only). Watch max/p99 in --profile."
+  if ($RequirePreemptRt) { Write-Host $Msg -ForegroundColor Red; exit 2 }
+  Write-Host $Msg -ForegroundColor Yellow
+}
+$Gov = Invoke-Pi "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown"
+if ($Gov -ne "performance") { Write-Host "CPU governor is '$Gov' (expected 'performance')." -ForegroundColor Red; exit 3 }
+$RtLimit = Invoke-Pi "ulimit -r"
+if ($RtPrio -gt 0 -and ($RtLimit -ne "unlimited") -and ([int]$RtLimit -lt $RtPrio)) {
+  Write-Host "ulimit -r is $RtLimit; chrt -f $RtPrio will fail. Add 'sonitude - rtprio 95' to /etc/security/limits.d/ and log in again." -ForegroundColor Red
+  exit 5
+}
+
+if ($SyncCode) {
+  Write-Host "[2/5] Sync edge/ (incl. zoo) -> ${Pi}:$PiRepo"
+  $Tgz = Join-Path $env:TEMP "sb_edge_sync.tgz"
+  tar -czf $Tgz -C $RepoRoot --exclude="__pycache__" --exclude="_archive_test" edge
+  scp -q -o BatchMode=yes $Tgz "${Pi}:/tmp/sb_edge_sync.tgz"
+  Invoke-Pi "mkdir -p $PiRepo/logs && tar -xzf /tmp/sb_edge_sync.tgz -C $PiRepo && rm /tmp/sb_edge_sync.tgz"
+} else {
+  Write-Host "[2/5] Skipping code sync (pass -SyncCode to push edge/ first)"
+}
+
+Write-Host "[2b/5] Preflight: Pi venv has runtime deps (no torch needed)"
+$Preflight = "$PiVenv/bin/python -c `"import importlib.util,sys; m=[n for n in ('numpy','scipy','onnxruntime','sounddevice','soundfile') if importlib.util.find_spec(n) is None]; print('missing: '+', '.join(m) if m else 'preflight ok'); sys.exit(1 if m else 0)`""
+Invoke-Pi $Preflight | Out-Host
+if ($LASTEXITCODE -ne 0) { Write-Host "Fix: $PiVenv/bin/pip install -r edge/requirements_edge.txt" -ForegroundColor Red; exit 1 }
+
+$Flags = [System.Collections.Generic.List[string]]::new()
+if ($Model) {
+  $Flags.Add("--model $Model")
+  # Pair contract so count/distance heads and trained_epochs metadata load (A3).
+  if ($Model -like "*.onnx") {
+    $ContractPath = ($Model -replace '\.onnx$', '.runtime.json')
+  } else {
+    $ContractPath = "$Model.runtime.json"
+  }
+  $Flags.Add("--contract-path $ContractPath")
+} else {
+  $Flags.Add("--zoo-dir $ZooDir --bubble-radius $BubbleRadius")
+}
+$Flags.Add("--input-device $InputDeviceIdx --output-device $OutputDeviceIdx")
+$Flags.Add("--input-channels $InputChannels --output-channels $OutputChannels --channel-map $ChannelMap")
+$Flags.Add("--mix-dry $MixDry")
+$Flags.Add("--silence-dbfs $SilenceDbfs")
+if ($P.InputSR)          { $Flags.Add("--input-sr $($P.InputSR)") }
+if ($P.HopsPerIo)        { $Flags.Add("--hops-per-io $($P.HopsPerIo)") }
+if ($P.IntraOpThreads)   { $Flags.Add("--intra-op-threads $($P.IntraOpThreads) --inter-op-threads 1") }
+if ($P.MaxStepsPerBlock) { $Flags.Add("--max-steps-per-block $($P.MaxStepsPerBlock)") }
+if ($P.TargetAheadSec)   { $Flags.Add("--target-output-ahead-sec $($P.TargetAheadSec)") }
+if ($P.MaxAheadSec)      { $Flags.Add("--max-output-ahead-sec $($P.MaxAheadSec)") }
+if ($P.QueuePolicy)      { $Flags.Add("--queue-policy $($P.QueuePolicy)") }
+if ($P.OverloadPolicy)   { $Flags.Add("--overload-policy $($P.OverloadPolicy)") }
+$Flags.Add("--profile")
+
+$RtPrefix = if ($RtPrio -gt 0) { "chrt -f $RtPrio " } else { "" }
+$TimeoutPrefix = if ($DurationSec -gt 0) { "timeout --signal=INT $DurationSec " } else { "" }
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$RemoteLog = "$PiRepo/logs/live_pipeline_$Timestamp.log"
+$RemoteLog = "$PiRepo/logs/live_${Preset}_$Timestamp.log"
 
-Write-Host "[1/5] Check SSH"
-ssh "$PiUser@$PiHost" "echo connected"
-
-Write-Host "[1b/5] Preflight: kernel + governor"
-if ($CheckPreemptRt) {
-  # Prefer kernel-config check: Pi OS builds don't consistently surface PREEMPT_RT in uname strings.
-  $Cfg = ssh "$PiUser@$PiHost" "grep -i PREEMPT_RT /boot/config-`$(uname -r) 2>/dev/null || true"
-  if ($Cfg -notmatch "PREEMPT_RT") {
-    $Msg = "[warn] PREEMPT_RT not detected via /boot/config-$(uname -r). Determinism risk (scheduler spikes)."
-    if ($RequirePreemptRt) {
-      Write-Host $Msg -ForegroundColor Red
-      Write-Host "Set `$RequirePreemptRt = `$false to continue anyway." -ForegroundColor Red
-      exit 2
-    } else {
-      Write-Host $Msg -ForegroundColor Yellow
-    }
-  } else {
-    Write-Host "[ok] PREEMPT_RT detected (kernel config)" -ForegroundColor Green
-  }
-}
-
-if ($CheckCpuGovernor) {
-  $Gov = ssh "$PiUser@$PiHost" "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown"
-  if ($Gov -ne "performance") {
-    $Msg = "[warn] CPU governor is '$Gov' (expected 'performance')."
-    if ($RequireCpuPerformance) {
-      Write-Host $Msg -ForegroundColor Red
-      Write-Host "Fix on Pi: enable cpu-performance.service (see bring-up notes), then retry." -ForegroundColor Red
-      exit 3
-    } else {
-      Write-Host $Msg -ForegroundColor Yellow
-    }
-  } else {
-    Write-Host "[ok] CPU governor = performance" -ForegroundColor Green
-  }
-}
-
-Write-Host "[2/5] Ensure logs dir + upload model artifacts"
-ssh "$PiUser@$PiHost" "mkdir -p $PiRepo/logs"
-if ($UseZoo) {
-  if (-not (Test-Path $LocalZooDir)) {
-    Write-Host "[zoo] LocalZooDir '$LocalZooDir' not found. Aborting." -ForegroundColor Red
-    exit 1
-  }
-  Write-Host "[zoo] syncing $LocalZooDir -> Pi:$PiRepo/edge/zoo/"
-  ssh "$PiUser@$PiHost" "mkdir -p $PiRepo/edge/zoo"
-  scp -r "$LocalZooDir\*" "$PiUser@$PiHost`:$PiRepo/edge/zoo/"
-} else {
-  scp "$LocalOnnx" "$PiUser@$PiHost`:$PiRepo/edge/model.onnx"
-  scp "$LocalContract" "$PiUser@$PiHost`:$PiRepo/edge/model.runtime.json"
-}
-
-Write-Host "[2b/5] Preflight: verify Pi venv has required Python deps"
-$Preflight = @"
-set -e
-cd $PiRepo
-source .venv/bin/activate
-python - <<'PY'
-import importlib, sys
-required = ('numpy','scipy','onnx','onnxruntime','sounddevice','soundfile','torch')
-missing = []
-for m in required:
-    try: importlib.import_module(m)
-    except Exception as e: missing.append(f'{m}: {e}')
-if missing:
-    print('PREFLIGHT FAIL:')
-    for line in missing: print('  -', line)
-    print('Fix: source .venv/bin/activate && pip install -r edge/requirements_edge.txt && pip install onnx sounddevice soundfile librosa')
-    sys.exit(1)
-print('preflight ok')
-PY
-"@
-ssh "$PiUser@$PiHost" "bash -lc '$Preflight'"
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "Preflight failed. Run the bootstrap script on Pi and retry." -ForegroundColor Red
-  exit 1
-}
-
-Write-Host "[3/5] Start live pipeline (CTRL+C to stop)"
-if     ($UseRtPrio -and $UseSudoForChrt) { $RtPrefix = "sudo chrt -f 50 " }
-elseif ($UseRtPrio)                      { $RtPrefix = "chrt -f 50 "      }
-else                                     { $RtPrefix = ""                 }
-$PyBin = if ($UseRtPrio) { ".venv/bin/python" } else { "python" }
-if ($UseZoo) {
-  $ModelSelect = "--zoo-dir edge/zoo --bubble-radius $BubbleRadius"
-} else {
-  $ModelSelect = "--model edge/model.onnx --contract-path edge/model.runtime.json"
-}
-$Cmd = @"
-set -e
-cd $PiRepo
-source .venv/bin/activate
-echo '[info] starting live pipeline' | tee -a $RemoteLog
-$RtPrefix$PyBin edge/inference_pipeline.py \
-  $ModelSelect \
-  --input-device $InputDeviceIdx \
-  --output-device $OutputDeviceIdx \
-  --input-channels $InputChannels \
-  --output-channels $OutputChannels \
-  --channel-map $ChannelMap \
-  --input-sr $InputSR \
-  --model-sr $ModelSR \
-  --output-sr $OutputSR \
-  --intra-op-threads $IntraOpThreads \
-  --inter-op-threads $InterOpThreads \
-  --hops-per-io $HopsPerIo \
-  --profile 2>&1 | tee -a $RemoteLog
-"@
-
-ssh -t "$PiUser@$PiHost" "bash -lc '$Cmd'"
+Write-Host "[3/5] Start live pipeline (preset=$Preset; CTRL+C to stop)"
+$Cmd = "cd $PiRepo && echo '[info] preset=$Preset' | tee -a $RemoteLog && $TimeoutPrefix$RtPrefix$PiVenv/bin/python -m edge.inference_pipeline $($Flags -join ' ') 2>&1 | tee -a $RemoteLog"
+Write-Host $Cmd -ForegroundColor DarkGray
+ssh -t $Pi "bash -lc `"$Cmd`""
 
 Write-Host "[4/5] Pipeline stopped"
 Write-Host "[5/5] Log saved on Pi: $RemoteLog"
-Write-Host "To view: ssh $PiUser@$PiHost `"tail -n 200 $RemoteLog`""
+Write-Host "To view: ssh $Pi `"tail -n 200 $RemoteLog`""

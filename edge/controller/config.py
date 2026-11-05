@@ -11,10 +11,10 @@ EDGE_ROOT = REPO_ROOT / "edge"
 @dataclass(slots=True)
 class PipelineConfig:
     # Model selection
-    model: str | None = "edge/model.onnx"
-    contract_path: str | None = "edge/model.runtime.json"
-    zoo_dir: str | None = None
-    bubble_radius: float | None = None
+    model: str | None = None
+    contract_path: str | None = None
+    zoo_dir: str | None = "edge/zoo"
+    bubble_radius: float | None = 1.5
 
     # Audio devices/channels
     input_device: int | None = None
@@ -25,7 +25,7 @@ class PipelineConfig:
     monitor_input_channel: int = 0
 
     # Rates/chunking
-    input_sr: int = 44100
+    input_sr: int = 48000
     model_sr: int = 24000
     output_sr: int = 48000
     model_chunk: int = 192
@@ -45,7 +45,7 @@ class PipelineConfig:
     mix_dry: float = 0.0
     input_gain_db: float = 0.0
     alpha: float = 0.9999
-    silence_dbfs: float = -50.0
+    silence_dbfs: float = -100.0
     silence_window_frames: int = 8
     fault_min_dbfs: float = -1.0
     fault_max_dbfs: float = 0.0
@@ -57,6 +57,14 @@ class PipelineConfig:
     model_ring_ms: float = 64.0
     max_steps_per_block: int = 4
     require_soxr: bool = False
+    warmup_runs: int = 20
+
+    # Queue / overload policy
+    queue_policy: str = "adaptive"
+    overload_policy: str = "silence_fill"
+    max_capture_age_ms: float = 24.0
+    recover_steps_per_block: int = 2
+    recover_ahead_multiplier: float = 1.5
 
     # Visibility
     profile: bool = True
@@ -116,6 +124,14 @@ def validate_config(config: PipelineConfig) -> PipelineConfig:
         raise ValueError("zoo_dir requires bubble_radius")
     if config.latency not in {"low", "high"}:
         raise ValueError("latency must be 'low' or 'high'")
+    if config.queue_policy not in {"fifo", "latest", "adaptive"}:
+        raise ValueError("queue_policy must be 'fifo', 'latest' or 'adaptive'")
+    if config.overload_policy not in {"dry_fill", "silence_fill", "strict"}:
+        raise ValueError("overload_policy must be 'dry_fill', 'silence_fill' or 'strict'")
+    if config.max_capture_age_ms <= 0:
+        raise ValueError("max_capture_age_ms must be > 0")
+    if config.recover_ahead_multiplier < 1.0:
+        raise ValueError("recover_ahead_multiplier must be >= 1.0")
 
     ints_positive = {
         "input_channels": config.input_channels,
@@ -132,6 +148,8 @@ def validate_config(config: PipelineConfig) -> PipelineConfig:
         "inter_op_threads": config.inter_op_threads,
         "silence_window_frames": config.silence_window_frames,
         "max_steps_per_block": config.max_steps_per_block,
+        "recover_steps_per_block": config.recover_steps_per_block,
+        "warmup_runs": config.warmup_runs,
     }
     bad = [name for name, value in ints_positive.items() if int(value) < 1]
     if bad:
@@ -214,6 +232,12 @@ def build_pipeline_argv(config: PipelineConfig) -> list[str]:
         ("--monitor-interval", cfg.monitor_interval),
         ("--model-ring-ms", cfg.model_ring_ms),
         ("--max-steps-per-block", cfg.max_steps_per_block),
+        ("--warmup-runs", cfg.warmup_runs),
+        ("--queue-policy", cfg.queue_policy),
+        ("--overload-policy", cfg.overload_policy),
+        ("--max-capture-age-ms", cfg.max_capture_age_ms),
+        ("--recover-steps-per-block", cfg.recover_steps_per_block),
+        ("--recover-ahead-multiplier", cfg.recover_ahead_multiplier),
     ]
     for flag, value in value_flags:
         if value is not None:

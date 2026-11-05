@@ -13,7 +13,7 @@
     4,
     5
   ],
-  "notes": "Auto-generated from experiment config used during ONNX export.",
+  "notes": "Auto-generated from experiment config used during ONNX export. Staged for realtime: Sonitude optim_count_distance_fixture (speaker_* head names). Promoted compose audio-only also at *_audio.onnx (epoch 0 compose; ep35 is count_distance_head_optim_1_5m).",
   "model_class": "src.models.tfgridnet_realtime_clean_optim.net.Net",
   "dis_threshold": 1.5,
   "source_config": "C:\\Users\\darre\\Sound_Bubble_optim_distance\\real_experiments\\count_distance_head_optim_1_5m.json",
@@ -24,5 +24,11 @@
   "speaker_active_threshold": 0.5,
   "speaker_update_interval_s": 0.008,
   "speaker_fast_tau_s": 0.35,
-  "speaker_slow_tau_s": 1.2
+  "speaker_slow_tau_s": 1.2,
+  "promoted_run": "optim_pretrain_sonitude_dist_count_1_5m",
+  "head_output_names": [
+    "speaker_count_logits",
+    "spk_distance_m",
+    "spk_active"
+  ]
 }

@@ -17,7 +17,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import src.utils as utils
-from runtime_contract import from_training_params, save_contract
+from edge.runtime_contract import from_training_params, save_contract
 
 
 DEFAULT_ATOL = 1e-4
@@ -50,11 +50,19 @@ def _dis_embed_tensor(radius: float, batch_size: int) -> torch.Tensor:
 
 def _has_distance_head(model: torch.nn.Module) -> bool:
     tfgridnet = getattr(model, "tfgridnet", None)
-    return bool(getattr(tfgridnet, "distance_head_enabled", False))
+    return bool(
+        getattr(tfgridnet, "distance_head_enabled", False)
+        or getattr(tfgridnet, "count_distance_head_enabled", False)
+        or getattr(tfgridnet, "count_distance_head", None) is not None
+    )
 
 def _has_count_head(model: torch.nn.Module) -> bool:
     tfgridnet = getattr(model, "tfgridnet", None)
-    return bool(getattr(tfgridnet, "count_head_enabled", False))
+    return bool(
+        getattr(tfgridnet, "count_head_enabled", False)
+        or getattr(tfgridnet, "count_distance_head_enabled", False)
+        or getattr(tfgridnet, "count_distance_head", None) is not None
+    )
 
 
 def _tokenized_sort_key(name: str) -> list[Any]:
@@ -153,20 +161,27 @@ class StreamingONNXWrapper(torch.nn.Module):
     def _pack_output(self, outputs: dict[str, Any]) -> tuple[torch.Tensor, ...]:
         out_tensors: list[torch.Tensor] = [outputs["output"]]
         if self.include_distance_outputs:
-            if "distance_m" not in outputs or "distance_valid" not in outputs:
+            if "spk_distance_m" in outputs and "spk_active" in outputs:
+                out_tensors.append(outputs["spk_distance_m"])
+                out_tensors.append(outputs["spk_active"])
+            elif "distance_m" in outputs and "distance_valid" in outputs:
+                out_tensors.append(outputs["distance_m"])
+                out_tensors.append(outputs["distance_valid"])
+            else:
                 raise RuntimeError(
                     "Model is configured to export distance outputs, but forward output lacks "
-                    "distance_m/distance_valid."
+                    "distance_m/distance_valid or spk_distance_m/spk_active."
                 )
-            out_tensors.append(outputs["distance_m"])
-            out_tensors.append(outputs["distance_valid"])
         if self.include_count_outputs:
-            if "count_probs" not in outputs:
+            if "speaker_count_logits" in outputs:
+                out_tensors.append(outputs["speaker_count_logits"])
+            elif "count_probs" in outputs:
+                out_tensors.append(outputs["count_probs"])
+            else:
                 raise RuntimeError(
                     "Model is configured to export count outputs, but forward output lacks "
-                    "count_probs."
+                    "count_probs or speaker_count_logits."
                 )
-            out_tensors.append(outputs["count_probs"])
         next_state = outputs["next_state"]
         for path in self.state_layout.paths:
             node: Any = next_state
@@ -319,10 +334,19 @@ def main() -> None:
         dummy_inputs = (dummy_mixture, *dummy_state)
         input_names = ["mixture"] + [f"state_{i}" for i in range(layout.num_tensors)]
     output_names = ["output"]
+    # Probe forward keys so CountDistanceHead (spk_*) and legacy heads both export correctly.
+    with torch.no_grad():
+        _probe = model({"mixture": dummy_mixture}, input_state=template_state, pad=False)
     if has_distance_head:
-        output_names.extend(["distance_m", "distance_valid"])
+        if "spk_distance_m" in _probe:
+            output_names.extend(["spk_distance_m", "spk_active"])
+        else:
+            output_names.extend(["distance_m", "distance_valid"])
     if has_count_head:
-        output_names.extend(["count_probs"])
+        if "speaker_count_logits" in _probe:
+            output_names.append("speaker_count_logits")
+        else:
+            output_names.append("count_probs")
     output_names.extend([f"next_state_{i}" for i in range(layout.num_tensors)])
 
     # Opset>=11 + dynamic frame_len on a jit-traced streaming wrapper can hit
