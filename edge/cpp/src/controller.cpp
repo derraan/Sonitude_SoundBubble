@@ -41,6 +41,20 @@
 namespace soundbubble {
 namespace {
 
+std::string local_stamp() {
+  auto now = std::chrono::system_clock::now();
+  std::time_t t = std::chrono::system_clock::to_time_t(now);
+  std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm);
+  return buf;
+}
+
 std::string iso_now() {
   auto now = std::chrono::system_clock::now();
   std::time_t t = std::chrono::system_clock::to_time_t(now);
@@ -96,7 +110,7 @@ void set_if(ControllerConfig& cfg, const Json& j) {
       "channel_map", "monitor_input_channel", "input_sr", "model_sr", "output_sr", "model_chunk", "model_pad", "model_num_ch",
       "hops_per_io", "output_device_block", "duplex_mode", "duplex_block", "latency", "max_capture_blocks", "max_output_ahead_sec", "target_output_ahead_sec", "rt_fifo_priority",
       "output_gain_db", "output_limiter", "limiter_ceiling", "limiter_release_ms",
-      "mix_dry", "input_gain_db", "alpha", "silence_dbfs", "silence_window_frames", "fault_min_dbfs", "fault_max_dbfs",
+      "mix_dry", "input_gain_db", "mic_gains", "alpha", "silence_dbfs", "silence_window_frames", "fault_min_dbfs", "fault_max_dbfs",
       "max_overrun_ms", "intra_op_threads", "inter_op_threads", "model_ring_ms", "max_steps_per_block", "require_soxr",
       "wake_model_dir", "wake_phrases_json", "wake_phrase", "wake_threshold", "wake_hold_sec", "wake_replay_sec", "wake_replay_rate",
       "wake_release_ms", "profile", "profile_interval", "monitor", "monitor_interval",
@@ -182,6 +196,11 @@ void set_if(ControllerConfig& cfg, const Json& j) {
   str_req("tap_select", cfg.tap_select);
   num("tap_max_seconds", cfg.tap_max_seconds);
   num("tap_max_mb", cfg.tap_max_mb);
+  {
+    std::optional<std::string> mg;
+    str("mic_gains", mg);
+    cfg.mic_gains = mg.value_or("");
+  }
 }
 
 std::string resolve_under(const std::optional<std::string>& text, const std::filesystem::path& repo, bool must_exist, const char* kind,
@@ -281,6 +300,23 @@ ControllerConfig validate_controller_config(ControllerConfig cfg, const std::str
   if (cfg.tap_select.empty()) cfg.tap_select = "mapped,dry,wet";
   if (cfg.tap_max_seconds < 0.0) throw std::invalid_argument("tap_max_seconds must be >= 0");
   if (cfg.tap_max_mb < 0.0) throw std::invalid_argument("tap_max_mb must be >= 0");
+  if (!cfg.mic_gains.empty()) {
+    std::stringstream ss(cfg.mic_gains);
+    std::string tok;
+    int n = 0;
+    while (std::getline(ss, tok, ',')) {
+      std::size_t used = 0;
+      double v = 0.0;
+      try {
+        v = std::stod(tok, &used);
+      } catch (const std::exception&) {
+        throw std::invalid_argument("mic_gains must be comma-separated numbers");
+      }
+      if (!(v > 0.0) || !std::isfinite(v) || v > 100.0) throw std::invalid_argument("mic_gains values must be in (0, 100]");
+      ++n;
+    }
+    if (n < 1 || n > 8) throw std::invalid_argument("mic_gains needs 1..8 values (device channel order)");
+  }
   cfg.tap_dir = resolve_tap_dir(cfg.tap_dir, repo_root);
   return cfg;
 }
@@ -362,6 +398,7 @@ std::vector<std::string> build_pipeline_argv(const ControllerConfig& cfg_in, con
     add("--mix-uart-port", cfg.mix_uart_port);
     add_num("--mix-uart-baud", cfg.mix_uart_baud);
   }
+  if (!cfg.mic_gains.empty() && cfg.runtime == "cpp") add("--mic-gains", cfg.mic_gains);
   if (!cfg.tap_dir.empty()) {
     add("--tap-dir", cfg.tap_dir);
     add("--tap-select", cfg.tap_select);
@@ -742,6 +779,7 @@ std::string controller_config_to_json(const ControllerConfig& cfg) {
   j.o["tap_select"] = json_string(cfg.tap_select);
   j.o["tap_max_seconds"] = json_number(cfg.tap_max_seconds);
   j.o["tap_max_mb"] = json_number(cfg.tap_max_mb);
+  j.o["mic_gains"] = json_string(cfg.mic_gains);
   return dump_json(j);
 }
 
@@ -799,6 +837,10 @@ void ProcessManager::reap_exited_child() {
   if (out.joinable()) out.join();
   if (err.joinable()) err.join();
 #endif
+  {
+    std::lock_guard<std::recursive_mutex> session_lock(mu_);
+    if (!process_) close_session_locked(returncode_);
+  }
 }
 
 bool ProcessManager::is_running() {
@@ -841,7 +883,67 @@ void ProcessManager::append(const std::string& line, const std::string& stream) 
     obj.o["received_at"] = json_string(iso_now());
     last_profile_json_ = dump_json(obj);
   }
-  if (parse_monitor_line(line, monitor_)) has_monitor_ = true;
+  bool monitor_hit = parse_monitor_line(line, monitor_);
+  if (monitor_hit) has_monitor_ = true;
+  if (session_log_.is_open() && stream != "journal") {
+    session_log_ << iso_now() << " " << stamped << "\n";
+    session_log_.flush();
+    if (parsed.ok) session_tel_ << "{\"t\":\"" << iso_now() << "\",\"kind\":\"profile\",\"data\":" << last_profile_json_ << "}\n";
+    if (monitor_hit) {
+      session_tel_ << "{\"t\":\"" << iso_now() << "\",\"kind\":\"monitor\",\"data\":" << dump_json(monitor_to_json(monitor_)) << "}\n";
+    }
+    if (parsed.ok || monitor_hit) session_tel_.flush();
+  }
+}
+
+void ProcessManager::open_session_locked(const ControllerConfig& cfg) {
+  if (cfg.tap_dir.empty()) return;
+  std::string dir;
+  for (size_t i = 0; i + 1 < argv_.size(); ++i) {
+    if (argv_[i] == "--tap-dir") dir = argv_[i + 1];
+  }
+  if (dir.empty()) return;
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    errors_.push_back("[controller] cannot create session dir " + dir + ": " + ec.message());
+    return;
+  }
+  session_dir_ = dir;
+  Json j;
+  j.type = Json::Type::Object;
+  j.o["started_at"] = json_string(started_at_);
+  j.o["session_dir"] = json_string(dir);
+  j.o["runtime"] = json_string(cfg.runtime);
+  j.o["config"] = parse_json(owned_config_json_);
+  Json args;
+  args.type = Json::Type::Array;
+  for (const auto& a : argv_) args.a.push_back(json_string(a));
+  j.o["argv"] = args;
+  if (cfg.model) {
+    std::error_code sz_ec;
+    auto sz = std::filesystem::file_size(*cfg.model, sz_ec);
+    j.o["model_bytes"] = sz_ec ? Json{} : json_number(static_cast<double>(sz));
+  }
+  j.o["notes"] = json_string("raw_8ch = device order before input gain and mic gains; see edge/MIC_INDEX_CANON.md");
+  std::ofstream(std::filesystem::path(dir) / "session.json") << dump_json(j) << "\n";
+  session_log_.open(std::filesystem::path(dir) / "pipeline.log", std::ios::app);
+  session_tel_.open(std::filesystem::path(dir) / "telemetry.jsonl", std::ios::app);
+  for (const auto& line : logs_) session_log_ << iso_now() << " " << line << "\n";
+  session_log_.flush();
+}
+
+void ProcessManager::close_session_locked(std::optional<int> returncode) {
+  if (session_dir_.empty()) return;
+  if (session_log_.is_open()) session_log_.close();
+  if (session_tel_.is_open()) session_tel_.close();
+  Json j;
+  j.type = Json::Type::Object;
+  j.o["started_at"] = json_string(started_at_);
+  j.o["ended_at"] = json_string(iso_now());
+  j.o["returncode"] = returncode ? json_number(*returncode) : Json{};
+  std::ofstream(std::filesystem::path(session_dir_) / "session_end.json") << dump_json(j) << "\n";
+  session_dir_.clear();
 }
 
 std::string ProcessManager::status_json() {
@@ -892,6 +994,11 @@ std::string ProcessManager::start(const std::string& config_json) {
   if (process_) throw std::runtime_error("Pipeline is already running. Use /restart to replace it.");
   ensure_production_stopped();
   ControllerConfig cfg = controller_config_from_json(config_json.empty() ? "{}" : config_json);
+  if (!cfg.tap_dir.empty()) {
+    std::string base = cfg.tap_dir;
+    while (!base.empty() && (base.back() == '/' || base.back() == '\\')) base.pop_back();
+    cfg.tap_dir = base + "/" + local_stamp();
+  }
   argv_ = build_pipeline_argv(cfg, repo_, rt_bin_);
   std::vector<std::string> cmd = argv_;
   std::string python_exe = python_;
@@ -996,6 +1103,8 @@ std::string ProcessManager::start(const std::string& config_json) {
   owned_config_json_ = controller_config_to_json(cfg);
   test_owned_ = false;
   returncode_.reset();
+  close_session_locked(std::nullopt);
+  open_session_locked(cfg);
   return status_json();
 }
 
@@ -1041,6 +1150,7 @@ std::string ProcessManager::stop() {
   owned_config_json_.clear();
   test_owned_ = false;
 #endif
+  close_session_locked(returncode_);
   return status_json();
 }
 

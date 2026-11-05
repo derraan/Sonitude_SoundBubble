@@ -5,6 +5,7 @@
 #include <memory>
 #include <deque>
 #include <mutex>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <thread>
@@ -48,6 +49,8 @@ struct ControllerConfig {
   double limiter_release_ms = 25.0;
   double mix_dry = 0.0;
   double input_gain_db = 0.0;
+  // Per-mic linear trims by DEVICE channel ("1.514,...,6.683"); empty = off. cpp runtime only.
+  std::string mic_gains;
   double alpha = 0.9999;
   double silence_dbfs = -50.0;
   int silence_window_frames = 8;
@@ -165,6 +168,10 @@ class ProcessManager {
   // Stops systemd unit sonitude-soundbubble so an owned child can open the Pico.
   // Requires passwordless sudo for that unit (edge/rpi5/sudoers-sonitude-soundbubble-ctl).
   void ensure_production_stopped();
+  // Dataset recording session (tap_dir set): per-run folder with WAVs + session.json,
+  // pipeline.log (all child output) and telemetry.jsonl (parsed monitor/profile).
+  void open_session_locked(const ControllerConfig& cfg);
+  void close_session_locked(std::optional<int> returncode);
   // waitpid(WNOHANG): clear process_ when the owned child has already exited.
   void reap_exited_child();
   std::string measure_root() const;
@@ -194,6 +201,9 @@ class ProcessManager {
   std::string taps_select_;
   bool taps_truncated_ = false;
   std::uint64_t seq_ = 0;
+  std::string session_dir_;
+  std::ofstream session_log_;
+  std::ofstream session_tel_;
   std::atomic<bool> observe_stop_{false};
   int journal_pid_ = 0;
   std::thread observe_thread_;
