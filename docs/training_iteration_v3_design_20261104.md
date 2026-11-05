@@ -2,6 +2,7 @@
 
 **Date:** 2026-11-04
 **Status:** **DESIGN, not started.** No configs launched, no checkpoints written.
+**Update 2026-11-05:** additions A1–A9 (six-mic normalization, random-ear reference, M0 in the low-mic augmentation, radius family) and the epoch 37 status are in `docs/training_status_v2_and_v3_improvements_20261105.md`.
 **Starting point:** v2 epoch 25 (`runs/optim_finetune_ep24_ep35prog_synreal_lean_v2_from_ep24/checkpoints/best.pt`; eval copy in `runs/_eval_v2_ep25_vs_ep35_20261104/`).
 **Evidence base:** `docs/FINDINGS_20261104.md`, `docs/eval_v2_ep25_vs_ep35_20261104.md`, `docs/speech_elevation_tests_ep35_20261104.md`, `docs/polar_sweep_1m_ep35_20261104.md`, `docs/mic_low_state_investigation_20261104.md`
 **Guardrails:** never overwrite EP24/EP35 sacred artifacts or `runs/_promoted/*`; new run dirs and new names only (`.cursor/rules/promoted-ep24-sacred.mdc`, `local-checkpoint-files.mdc`). The protected polar run is read-only (`protected-polar-sweep-1m-20261104.mdc`).

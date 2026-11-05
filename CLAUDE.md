@@ -11,3 +11,5 @@ Protected (never delete, move or overwrite; ask the owner first):
 Read-only for agents: `edge/MIC_INDEX_CANON.md` and the Pico firmware design docs (see their rules).
 
 Latest consolidated findings (training, runtime, testbench, mic hardware, EP35 on the real array): `docs/FINDINGS_20261104.md`.
+
+Pi recordings: all recording data (audio + logs) goes ONLY to `/mnt/sonitude-drive/sonitude-recordings/` on the Pi's external Samsung T5 SSD. The rest of that drive holds the owner's personal files: never write, move or delete anything outside `sonitude-recordings/`, and never record to the SD card. See `docs/pi_dashboard_models_and_recording_20261105.md`.
