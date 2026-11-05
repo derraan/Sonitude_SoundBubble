@@ -258,11 +258,15 @@ TEST(ControllerSession, DatasetRecordingWritesSessionLogAndTelemetry) {
   auto fake = tmp / "fake-rt.sh";
   {
     std::ofstream f(fake);
+    // Verbatim [profile] line captured from soundbubble-rt on the Pi (2026-11-04).
     f << "#!/bin/sh\n"
-         "echo \"[profile] mode=normal  capture_age=0.03ms  infer_mean=2.44ms  e2e=6.58ms  underrun_frames=0\"\n"
+         "echo \"[profile] mode=recover  capture_age=0.03ms  capture_gap=0  capture_drained=0  capture->frame=0.04ms  "
+         "dc=0.08ms  level-valid=0.18ms  frame->infer=0.91ms  infer_mean=2.44ms  infer_total=4.88ms  steps=2  "
+         "post+out=0.45ms  e2e=6.58ms  drift=+34.49ppm  q=1/2  drops_oldest=0  out_ahead=47.2ms dropped=0 "
+         "underrun_frames=6457  model_ring=7.2ms drops=0 resets=0\"\n"
          "echo \"ch0:  -61.5 dBFS ok         ch1:  -64.6 dBFS ok         ch2:  -65.6 dBFS ok\"\n"
          "echo \"out: wet_pre= -68.8 dBFS  wet_post= -72.3 dBFS  peak= -57.1 dBFS  play= -72.3 dBFS  frames=768\"\n"
-         "sleep 5\n";
+         "exec sleep 5\n";
   }
   std::filesystem::permissions(fake, std::filesystem::perms::owner_all);
   setenv("SOUNDBUBBLE_MEASURE_DIR", (tmp / "measure").c_str(), 1);
