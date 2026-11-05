@@ -22,7 +22,7 @@ from typing import Any
 
 from tools.measure.hats import HatsCaptureConfig, HatsRecorder
 from tools.measure.runtime import Gains, RuntimeLaunch, RuntimeProcess, sleep_ms
-from tools.measure.stimulus import StimulusPlayer
+from tools.measure.stimulus import StimulusPlayer, default_speech_dir
 
 try:
     from tools.tech_testbench.app.storage.trial_store import TrialStore, new_run_id, new_trial_id
@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover — allow running without UI package lay
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SPEECH_DIR = REPO_ROOT / "datasets" / "LibriSpeech" / "dev-clean"
+DEFAULT_SPEECH_DIR = default_speech_dir()
 
 
 def _utc_now() -> str:

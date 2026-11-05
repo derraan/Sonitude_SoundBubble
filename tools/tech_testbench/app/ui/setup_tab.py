@@ -43,7 +43,10 @@ from app.session import (
     normalized_mic_gains,
 )
 
-DEFAULT_SPEECH_DIR = REPO_ROOT / "datasets" / "LibriSpeech" / "dev-clean"
+from tools.measure.stimulus import default_speech_dir
+
+DEFAULT_SPEECH_DIR = default_speech_dir()
+SPEECH_DEFAULT_REPEAT = 4  # in_context_speech: play the loop ×4 per take (~60 s)
 MIC_GAIN_MIN = 0.01
 MIC_GAIN_MAX = 20.0
 MIC_SLIDER_SCALE = 100  # slider ticks per x1.0
@@ -371,6 +374,27 @@ class SetupTab(QWidget):
             self.rt_path.setText(rt)
         if isinstance(cmap, str) and cmap:
             self.channel_map.setText(cmap)
+        # Campaign must match the restored stimulus: a speech folder under
+        # controlled_ess fails validation ("not found") and the take never starts.
+        kind = s.value("profile/campaign", "")
+        if not isinstance(kind, str) or not kind:
+            kind = "in_context_speech" if stim and Path(str(stim)).is_dir() else ""
+        idx = self.campaign.findData(kind) if kind else -1
+        if idx >= 0:
+            self.campaign.blockSignals(True)  # no ESS<->speech auto-fill / persist mid-restore
+            self.campaign.setCurrentIndex(idx)
+            self.campaign.blockSignals(False)
+        rep = s.value("stimulus/repeat", None)
+        try:
+            rep_n = int(rep) if rep not in (None, "") else None
+        except (TypeError, ValueError):
+            rep_n = None
+        if rep_n is None:
+            rep_n = SPEECH_DEFAULT_REPEAT if kind == "in_context_speech" else None
+        if rep_n is not None:
+            self.stimulus_repeat.blockSignals(True)  # don't persist before devices restore
+            self.stimulus_repeat.setValue(max(1, rep_n))
+            self.stimulus_repeat.blockSignals(False)
         # Device indices: prefer last session, else SessionSettings defaults.
         for key, attr in (
             ("devices/stimulus_out", "stimulus_out_device"),
@@ -403,6 +427,8 @@ class SetupTab(QWidget):
         s.setValue("paths/measure_root", self.measure_root.text().strip())
         s.setValue("paths/soundbubble_rt", self.rt_path.text().strip())
         s.setValue("paths/channel_map", self.channel_map.text().strip())
+        s.setValue("profile/campaign", str(self.campaign.currentData()))
+        s.setValue("stimulus/repeat", int(self.stimulus_repeat.value()))
         s.setValue("io/input_sr", int(self.input_sr.value()))
         s.setValue("io/output_sr", int(self.output_sr.value()))
         for key, val in (
@@ -589,7 +615,10 @@ class SetupTab(QWidget):
             if not cur or (Path(cur).is_file() and "MeasSweep" in Path(cur).name):
                 if DEFAULT_SPEECH_DIR.is_dir():
                     self.stimulus.setText(str(DEFAULT_SPEECH_DIR))
+            if int(self.stimulus_repeat.value()) == 1:
+                self.stimulus_repeat.setValue(SPEECH_DEFAULT_REPEAT)
         else:
+            self.stimulus_repeat.setValue(1)  # ESS characterization is single-shot
             self.stimulus.setPlaceholderText(
                 "One shared REW ESS + timing-ref WAV (all tabs)"
             )
@@ -754,7 +783,13 @@ class SetupTab(QWidget):
         elif not Path(s.stimulus_path).is_file() and not (
             s.campaign_kind == "in_context_speech" and Path(s.stimulus_path).is_dir()
         ):
-            errs.append(f"Stimulus WAV (or speech folder) not found: {s.stimulus_path}")
+            if Path(s.stimulus_path).is_dir():
+                errs.append(
+                    f"Stimulus is a speech folder but Campaign is {s.campaign_kind} — "
+                    f"set Campaign to in_context_speech (or pick an ESS WAV): {s.stimulus_path}"
+                )
+            else:
+                errs.append(f"Stimulus WAV (or speech folder) not found: {s.stimulus_path}")
         if s.stimulus_out_device is None:
             errs.append("Stimulus out device is required (Setup).")
         if s.acoustic_profile == "pi_hats" and s.hats_in_device is None:

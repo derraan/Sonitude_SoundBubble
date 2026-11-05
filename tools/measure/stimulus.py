@@ -183,6 +183,30 @@ SPEECH_LOOP_LEVEL_DBFS = -26.0  # per-utterance active RMS (≈ ESS −20 dBFS p
 SPEECH_LOOP_MAX_UTT_S = 6.0     # long utterances are cut (at a quiet point 4–6 s) for more talkers per take
 
 
+_SPEECH_SUBDIR = Path("datasets") / "LibriSpeech" / "dev-clean"
+
+
+def default_speech_dir() -> Path:
+    """LibriSpeech dev-clean pool. ``datasets/`` is gitignored, so in a git worktree
+    (``.git`` is a ``gitdir:`` file) fall back to the main checkout's copy."""
+    repo = Path(__file__).resolve().parents[2]
+    local = repo / _SPEECH_SUBDIR
+    if local.is_dir():
+        return local
+    git = repo / ".git"
+    if git.is_file():
+        try:
+            line = git.read_text(encoding="utf-8").strip()
+            if line.startswith("gitdir:"):
+                # <main>/.git/worktrees/<name> -> <main>
+                main = Path(line.split(":", 1)[1].strip()).resolve().parents[2]
+                if (main / _SPEECH_SUBDIR).is_dir():
+                    return main / _SPEECH_SUBDIR
+        except OSError:
+            pass
+    return local
+
+
 def list_speech_files(src_dir: str | Path) -> list[Path]:
     """All speech files (flac/wav) under ``src_dir`` (recursive, sorted)."""
     root = Path(src_dir)

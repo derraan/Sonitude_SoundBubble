@@ -172,6 +172,11 @@ class AlgorithmTab(QWidget):
         self.preview.setReadOnly(True)
         root.addWidget(self.preview, stretch=1)
 
+        # Start from Setup's (restored) campaign; _on_context_changed below writes the
+        # combo back into the session, so a default index would clobber it.
+        idx = self.campaign.findData(session.campaign_kind)
+        if idx >= 0:
+            self.campaign.setCurrentIndex(idx)
         self.campaign.currentIndexChanged.connect(self._on_context_changed)
         self.direction.currentIndexChanged.connect(self._on_context_changed)
         self.use_fixed.toggled.connect(self._on_context_changed)

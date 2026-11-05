@@ -26,9 +26,7 @@ def main() -> None:
     assert len(build_preset("part_b_az")) == 12
     assert [p.distance_m for p in build_preset("ctx_dist", reverse_distance=True)] == [
         2.0,
-        1.7,
         1.5,
-        1.3,
         1.0,
         0.5,
     ]

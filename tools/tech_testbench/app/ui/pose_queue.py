@@ -47,7 +47,7 @@ def _part_b_distances() -> list[float]:
 
 
 def _in_context_distances() -> list[float]:
-    return [0.5, 1.0, 1.3, 1.5, 1.7, 2.0]
+    return [0.5, 1.0, 1.5, 2.0]
 
 
 def _in_context_elev_dists() -> list[float]:
@@ -58,7 +58,7 @@ PRESET_IDS = (
     ("part_b_az", "Part B az 0…330 @ 30° (d=1.0 m)"),
     ("part_b_el", "Part B el ±60 @ 30° (az=0, d=1.0 m)"),
     ("part_b_dist", "Part B distances 0.5 / 1.0 / 2.0 m"),
-    ("ctx_dist", "In-context distances 0.5…2.0 m"),
+    ("ctx_dist", "In-context distances 0.5 / 1.0 / 1.5 / 2.0 m"),
     ("ctx_elev_dist", "In-context elev × dist"),
 )
 
