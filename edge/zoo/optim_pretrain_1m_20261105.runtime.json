@@ -1,0 +1,24 @@
+{
+  "model_sr": 24000,
+  "model_num_ch": 6,
+  "model_chunk": 192,
+  "model_pad": 96,
+  "frame_len": 288,
+  "expected_input_channels": 8,
+  "expected_channel_map": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "notes": "Auto-generated from experiment config used during ONNX export.",
+  "model_class": "src.models.tfgridnet_realtime_clean_optim.net.Net",
+  "dis_threshold": 1.0,
+  "source_config": "C:\\Users\\darre\\Sound_Bubble\\runs\\_export_pretrain_1m_2m_20261105\\optim_pretrain_1m_config.json",
+  "source_checkpoint": "C:\\Users\\darre\\Sound_Bubble\\runs\\_export_pretrain_1m_2m_20261105\\optim_pretrain_1m_best.pt",
+  "trained_epochs": 80,
+  "distance_head_enabled": false,
+  "count_head_enabled": false
+}
