@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 try:
     from espnet2.torch_utils.get_layer_from_string import get_layer
@@ -439,11 +440,13 @@ class TFGridNet(AbsSeparator):
         fb_type='stft',
         count_distance_head: Optional[dict] = None,
         steered_head: Optional[dict] = None,
+        grad_ckpt: bool = False,
     ):
         super().__init__()
         self.n_srcs = n_srcs
         self.n_layers = n_layers
         self.n_imics = n_imics
+        self.grad_ckpt = bool(grad_ckpt)
         assert n_fft % 2 == 0
         n_freqs = n_fft // 2 + 1
         self.n_freqs = n_freqs
@@ -666,7 +669,15 @@ class TFGridNet(AbsSeparator):
         batch = batch.permute(0, 2, 3, 1)
         
         for ii in range(self.n_layers):
-            batch, gridnet_buf[f'buf{ii}'] = self.blocks[ii](batch, gridnet_buf[f'buf{ii}'])  # [B, -1, T, F]
+            block = self.blocks[ii]
+            buf = gridnet_buf[f'buf{ii}']
+            if self.training and self.grad_ckpt:
+                # Recompute block activations in backward to cut VRAM (~1/n_layers).
+                batch, gridnet_buf[f'buf{ii}'] = grad_checkpoint(
+                    block, batch, buf, use_reentrant=False
+                )
+            else:
+                batch, gridnet_buf[f'buf{ii}'] = block(batch, buf)  # [B, -1, T, F]
         
         batch = batch.permute(0, 3, 1, 2) # [B, C, T, Q]
         speaker_outputs = None

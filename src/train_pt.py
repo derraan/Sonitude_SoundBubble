@@ -64,16 +64,30 @@ def train(args: argparse.Namespace):
     utils.seed_all(args.seed)
     os.environ["CUBLAS_WORKSPACE_CONFIG"]=":4096:8"
 
-    # Turn on deterministic algorithms if specified (Note: slower training).
-    if torch.cuda.is_available():
-        if args.use_nondeterministic_cudnn:
-            torch.backends.cudnn.deterministic = False
-        else:
-            torch.backends.cudnn.deterministic = True
-
-    # Load experiment description
+    # Load experiment description early so CUDA/alloc knobs can apply before tensors.
     with open(args.config, 'rb') as f:
         params = json.load(f)
+
+    # Windows-safe allocator knobs (expandable_segments is ignored on Windows).
+    alloc_conf = params.get(
+        "cuda_alloc_conf",
+        "garbage_collection_threshold:0.8,max_split_size_mb:256",
+    )
+    if alloc_conf and "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = str(alloc_conf)
+        print(f"PYTORCH_CUDA_ALLOC_CONF={os.environ['PYTORCH_CUDA_ALLOC_CONF']}")
+
+    cudnn_benchmark = bool(params.get("cudnn_benchmark", False)) or bool(
+        getattr(args, "use_nondeterministic_cudnn", False)
+    )
+    if torch.cuda.is_available():
+        if cudnn_benchmark:
+            torch.backends.cudnn.deterministic = False
+            torch.backends.cudnn.benchmark = True
+            print("cuDNN benchmark=True (non-deterministic)")
+        else:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
     # Initialize datasets
     data_train = utils.import_attr(params['train_dataset'])(**params['train_data_args'], split='train')
@@ -83,6 +97,12 @@ def train(args: argparse.Namespace):
     use_cuda = True
     device = torch.device('cuda' if use_cuda else 'cpu')
     print("Using device {}".format('cuda' if use_cuda else 'cpu'))
+
+    gpu_mem_fraction = params.get("gpu_mem_fraction", None)
+    if gpu_mem_fraction is not None and device.type == "cuda":
+        frac = float(gpu_mem_fraction)
+        torch.cuda.set_per_process_memory_fraction(frac)
+        print(f"GPU memory fraction capped at {frac:.2f}")
 
     # Set multiprocessing params
     # Windows spawn can't pickle nested lambdas; use module-level worker_init_fns.
@@ -94,6 +114,9 @@ def train(args: argparse.Namespace):
         'worker_init_fn': worker_init_train,
         'pin_memory': True
     } if use_cuda else {}
+    if use_cuda and num_workers > 0:
+        kwargs['persistent_workers'] = True
+        kwargs['prefetch_factor'] = int(params.get('prefetch_factor', 4))
 
     # Set up data loaders
     train_loader = torch.utils.data.DataLoader(data_train,
@@ -110,7 +133,30 @@ def train(args: argparse.Namespace):
 
     # Initialize HL module
     hl_module = utils.import_attr(params['pl_module'])(**params['pl_module_args'])
-    hl_module.model.to(device) 
+    hl_module.model.to(device)
+
+    use_amp = bool(params.get("use_amp", False)) or bool(getattr(args, "amp", False))
+    amp_dtype_name = str(params.get("amp_dtype", "bf16")).lower()
+    if amp_dtype_name in ("bf16", "bfloat16"):
+        amp_dtype = torch.bfloat16
+    else:
+        amp_dtype = torch.float16
+    # GradScaler is only needed for fp16; bf16 on Ada does not use it.
+    scaler_enabled = use_amp and device.type == "cuda" and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
+    if use_amp:
+        print(
+            f"Using AMP dtype={amp_dtype_name} "
+            f"(GradScaler enabled={scaler.is_enabled()})"
+        )
+
+    grad_accum_steps = max(1, int(params.get("grad_accum_steps", 1)))
+    log_mem_every = int(params.get("log_mem_every", 0))
+    max_steps = int(getattr(args, "max_steps", 0) or params.get("max_steps", 0) or 0)
+    if grad_accum_steps > 1:
+        print(f"Gradient accumulation steps: {grad_accum_steps}")
+    if max_steps > 0:
+        print(f"Max train steps this run: {max_steps}")
     
     # Get run name from run dir
     run_name = os.path.basename(args.run_dir.rstrip('/'))
@@ -171,13 +217,35 @@ def train(args: argparse.Namespace):
             # Run testing step
             
             t1 = time.time()
-            train_loss = train_epoch(hl_module, train_loader, device)
+            train_loss = train_epoch(
+                hl_module,
+                train_loader,
+                device,
+                scaler=scaler,
+                use_amp=use_amp,
+                amp_dtype=amp_dtype,
+                grad_accum_steps=grad_accum_steps,
+                log_mem_every=log_mem_every,
+                max_steps=max_steps,
+            )
             t2 = time.time()
             print(f"Train epoch time: {t2 - t1:02f}s")
 
             print("\nTrain set: Average Loss: {:.4f}\n".format(train_loss))
 
             print()
+
+            # Probe / short runs: skip validation + checkpoint write.
+            if max_steps > 0:
+                if device.type == "cuda":
+                    peak_alloc = torch.cuda.max_memory_allocated() / (1024 ** 3)
+                    peak_reserved = torch.cuda.max_memory_reserved() / (1024 ** 3)
+                    print(
+                        f"[mem] peak_alloc={peak_alloc:.2f}GiB "
+                        f"peak_reserved={peak_reserved:.2f}GiB"
+                    )
+                print(f"max_steps={max_steps} reached; skipping val/checkpoint.")
+                break
 
             # Fix seed for all validation passes 
             # (needed since localization models will choose some random points, so we fix those)
@@ -244,4 +312,11 @@ if __name__ == '__main__':
     parser.add_argument('--no_wandb',
                         action='store_true',
                         help='Disable Weights & Biases logging (offline/no key).')
+    parser.add_argument('--amp',
+                        action='store_true',
+                        help='Enable CUDA automatic mixed precision (also set use_amp in config).')
+    parser.add_argument('--max_steps',
+                        type=int,
+                        default=0,
+                        help='If >0, run only this many train steps then exit (memory/speed probe).')
     train(parser.parse_args())

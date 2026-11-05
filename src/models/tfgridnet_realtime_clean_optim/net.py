@@ -25,7 +25,7 @@ class Net(nn.Module):
                  spectral_masking=False, use_first_ln=False, merge_method = "None",
                  directional = False, conv_lstm = True, lstm_down=5, fb_type='stft',
                  count_distance_head=None, distance_head=None, speaker_head=None,
-                 steered_head=None):
+                 steered_head=None, grad_ckpt=False):
         super(Net, self).__init__()
         self.stft_chunk_size = stft_chunk_size
         self.stft_pad_size = stft_pad_size
@@ -75,7 +75,8 @@ class Net(nn.Module):
                                    lstm_down=lstm_down,
                                    fb_type=fb_type,
                                    count_distance_head=count_distance_head,
-                                   steered_head=steered_head)
+                                   steered_head=steered_head,
+                                   grad_ckpt=grad_ckpt)
 
     def init_buffers(self, batch_size, device):
         return self.tfgridnet.init_buffers(batch_size, device)

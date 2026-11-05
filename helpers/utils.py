@@ -99,15 +99,17 @@ def read_audio_file(file_path, sr):
     return librosa.core.load(file_path, mono=False, sr=sr)[0]
 
 def read_audio_file_torch(file_path, downsample=1):
+    # Prefer soundfile first: torchaudio 2.11+ routes through TorchCodec/FFmpeg,
+    # which is often missing on Windows. Trying torchcodec first burns RAM in
+    # DataLoader workers (DLL load + huge exception text) and can surface as
+    # MemoryError mid-epoch even when the soundfile fallback would work.
     try:
-        waveform, sample_rate = torchaudio.load(file_path)
-    except Exception:
-        # TorchCodec/FFmpeg can be unavailable on some Windows setups; fall
-        # back to soundfile to keep training/eval functional.
         data, sample_rate = sf.read(file_path, always_2d=True, dtype="float32")
         waveform = torch.from_numpy(data.T)
-    if downsample >1:
-        waveform = torchaudio.functional.resample(waveform, sample_rate, sample_rate//downsample)
+    except Exception:
+        waveform, sample_rate = torchaudio.load(file_path)
+    if downsample > 1:
+        waveform = torchaudio.functional.resample(waveform, sample_rate, sample_rate // downsample)
     return waveform
 
 
